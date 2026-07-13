@@ -1,0 +1,211 @@
+:root {
+  --primary: #1f3864;
+  --accent: #2e74b5;
+  --bg: #f5f7fa;
+  --ok: #2e7d32;
+  --fail: #c62828;
+  --border: #d9e2ec;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: #1a1a1a;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+.app-header {
+  background: var(--primary);
+  padding: 14px 24px;
+}
+
+.brand {
+  color: white;
+  font-weight: 700;
+  text-decoration: none;
+  font-size: 18px;
+}
+
+.page {
+  max-width: 880px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+h1 {
+  color: var(--primary);
+  font-size: 24px;
+}
+
+h2 {
+  color: var(--accent);
+  font-size: 18px;
+  margin-top: 28px;
+}
+
+.back-link {
+  display: inline-block;
+  margin-bottom: 12px;
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 14px;
+}
+
+.muted {
+  color: #6b7280;
+  font-size: 14px;
+}
+
+.error {
+  background: #fdecea;
+  color: var(--fail);
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 14px;
+}
+
+.inline-form,
+.punto-form {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 16px 0;
+}
+
+input {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 14px;
+}
+
+button {
+  padding: 8px 16px;
+  border: none;
+  border-radius: 6px;
+  background: var(--accent);
+  color: white;
+  font-weight: 600;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+button:hover {
+  opacity: 0.9;
+}
+
+button.approve {
+  background: var(--ok);
+}
+
+button.reject {
+  background: var(--fail);
+}
+
+.card-list {
+  list-style: none;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.card {
+  background: white;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 16px;
+}
+
+.card a {
+  text-decoration: none;
+  color: #1a1a1a;
+}
+
+.actions-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin: 16px 0;
+}
+
+.secondary-link {
+  color: var(--accent);
+  font-size: 14px;
+}
+
+.estado {
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.estado-en_progreso {
+  background: #fff3cd;
+  color: #8a6d00;
+}
+
+.estado-aprobada {
+  background: #d4edda;
+  color: var(--ok);
+}
+
+.estado-rechazada {
+  background: #fdecea;
+  color: var(--fail);
+}
+
+.drawing-preview {
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin: 12px 0;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: white;
+  border-radius: 8px;
+  overflow: hidden;
+  margin: 12px 0;
+}
+
+th,
+td {
+  padding: 10px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
+}
+
+th {
+  background: var(--accent);
+  color: white;
+}
+
+.captura-table input {
+  width: 100px;
+}
+
+.resultado {
+  font-weight: 700;
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.resultado.ok {
+  background: #d4edda;
+  color: var(--ok);
+}
+
+.resultado.fail {
+  background: #fdecea;
+  color: var(--fail);
+}
