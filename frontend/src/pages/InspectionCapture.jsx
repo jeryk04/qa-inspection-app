@@ -136,6 +136,9 @@ export default function InspectionCapture() {
         <button onClick={() => handleStatus("rejected")} className="reject">
           Reject
         </button>
+        <Link to={`/inspections/${inspectionId}/sheet`} className="secondary-link">
+          View / Print Inspection Sheet
+        </Link>
       </div>
     </div>
   );

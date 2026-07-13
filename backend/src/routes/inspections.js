@@ -3,9 +3,9 @@ const db = require("../db");
 
 const router = express.Router();
 
-// GET /api/inspections?part_id=1&type=final
+// GET /api/inspections?part_id=1&type=final&client_id=1&status=approved&date_from=2026-01-01&date_to=2026-12-31
 router.get("/", (req, res) => {
-  const { part_id, type, client_id } = req.query;
+  const { part_id, type, client_id, status, date_from, date_to } = req.query;
 
   let query = `
     SELECT i.*, p.part_number, p.client_id, c.name AS client_name
@@ -28,6 +28,18 @@ router.get("/", (req, res) => {
     query += " AND p.client_id = ?";
     params.push(client_id);
   }
+  if (status) {
+    query += " AND i.status = ?";
+    params.push(status);
+  }
+  if (date_from) {
+    query += " AND i.date >= ?";
+    params.push(date_from);
+  }
+  if (date_to) {
+    query += " AND i.date <= ?";
+    params.push(date_to + " 23:59:59");
+  }
   query += " ORDER BY i.date DESC";
 
   res.json(db.prepare(query).all(...params));
@@ -35,7 +47,16 @@ router.get("/", (req, res) => {
 
 // GET /api/inspections/:id  (includes measurements + specs for each balloon)
 router.get("/:id", (req, res) => {
-  const inspection = db.prepare("SELECT * FROM inspections WHERE id = ?").get(req.params.id);
+  const inspection = db
+    .prepare(
+      `SELECT i.*, p.part_number, p.description AS part_description, p.client_id,
+              c.name AS client_name
+       FROM inspections i
+       JOIN parts p ON p.id = i.part_id
+       JOIN clients c ON c.id = p.client_id
+       WHERE i.id = ?`
+    )
+    .get(req.params.id);
   if (!inspection) return res.status(404).json({ error: "Inspection not found" });
 
   const measurements = db
