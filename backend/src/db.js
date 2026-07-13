@@ -9,7 +9,7 @@ const db = new Database(DB_PATH);
 db.pragma("journal_mode = WAL");
 db.pragma("foreign_keys = ON");
 
-// Crea las tablas si no existen (idempotente, seguro correr en cada arranque).
+// Creates the tables if they don't exist yet (idempotent, safe to run on every startup).
 const schema = fs.readFileSync(SCHEMA_PATH, "utf8");
 db.exec(schema);
 

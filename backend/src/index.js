@@ -2,10 +2,10 @@ const express = require("express");
 const cors = require("cors");
 const path = require("path");
 
-const clientesRouter = require("./routes/clientes");
-const piezasRouter = require("./routes/piezas");
+const clientsRouter = require("./routes/clients");
+const partsRouter = require("./routes/parts");
 const drawingsRouter = require("./routes/drawings");
-const inspeccionesRouter = require("./routes/inspecciones");
+const inspectionsRouter = require("./routes/inspections");
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -16,11 +16,11 @@ app.use("/uploads", express.static(path.join(__dirname, "..", "uploads")));
 
 app.get("/api/health", (req, res) => res.json({ ok: true }));
 
-app.use("/api/clientes", clientesRouter);
-app.use("/api/piezas", piezasRouter);
+app.use("/api/clients", clientsRouter);
+app.use("/api/parts", partsRouter);
 app.use("/api/drawings", drawingsRouter);
-app.use("/api/inspecciones", inspeccionesRouter);
+app.use("/api/inspections", inspectionsRouter);
 
 app.listen(PORT, () => {
-  console.log(`QA Inspection API corriendo en http://localhost:${PORT}`);
+  console.log(`QA Inspection API running at http://localhost:${PORT}`);
 });

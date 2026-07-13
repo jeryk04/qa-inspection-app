@@ -7,40 +7,40 @@ async function request(path, options = {}) {
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(err.error || "Error en la solicitud");
+    throw new Error(err.error || "Request failed");
   }
   if (res.status === 204) return null;
   return res.json();
 }
 
 export const api = {
-  // Clientes
-  getClientes: () => request("/clientes"),
-  createCliente: (data) => request("/clientes", { method: "POST", body: JSON.stringify(data) }),
+  // Clients
+  getClients: () => request("/clients"),
+  createClient: (data) => request("/clients", { method: "POST", body: JSON.stringify(data) }),
 
-  // Piezas
-  getPiezas: (clienteId) => request(`/piezas?cliente_id=${clienteId}`),
-  createPieza: (data) => request("/piezas", { method: "POST", body: JSON.stringify(data) }),
+  // Parts
+  getParts: (clientId) => request(`/parts?client_id=${clientId}`),
+  createPart: (data) => request("/parts", { method: "POST", body: JSON.stringify(data) }),
 
   // Balloon Drawings
-  getDrawings: (piezaId) => request(`/drawings?pieza_id=${piezaId}`),
+  getDrawings: (partId) => request(`/drawings?part_id=${partId}`),
   getDrawing: (id) => request(`/drawings/${id}`),
   uploadDrawing: (formData) => request("/drawings", { method: "POST", body: formData }),
-  addPunto: (drawingId, data) =>
-    request(`/drawings/${drawingId}/puntos`, { method: "POST", body: JSON.stringify(data) }),
+  addPoint: (drawingId, data) =>
+    request(`/drawings/${drawingId}/points`, { method: "POST", body: JSON.stringify(data) }),
 
-  // Inspecciones
-  getInspecciones: (params = {}) => {
+  // Inspections
+  getInspections: (params = {}) => {
     const qs = new URLSearchParams(params).toString();
-    return request(`/inspecciones${qs ? `?${qs}` : ""}`);
+    return request(`/inspections${qs ? `?${qs}` : ""}`);
   },
-  getInspeccion: (id) => request(`/inspecciones/${id}`),
-  createInspeccion: (data) => request("/inspecciones", { method: "POST", body: JSON.stringify(data) }),
-  saveMediciones: (inspeccionId, mediciones) =>
-    request(`/inspecciones/${inspeccionId}/mediciones`, {
+  getInspection: (id) => request(`/inspections/${id}`),
+  createInspection: (data) => request("/inspections", { method: "POST", body: JSON.stringify(data) }),
+  saveMeasurements: (inspectionId, measurements) =>
+    request(`/inspections/${inspectionId}/measurements`, {
       method: "PUT",
-      body: JSON.stringify({ mediciones }),
+      body: JSON.stringify({ measurements }),
     }),
-  setEstado: (inspeccionId, estado) =>
-    request(`/inspecciones/${inspeccionId}/estado`, { method: "PUT", body: JSON.stringify({ estado }) }),
+  setStatus: (inspectionId, status) =>
+    request(`/inspections/${inspectionId}/status`, { method: "PUT", body: JSON.stringify({ status }) }),
 };

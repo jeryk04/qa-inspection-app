@@ -138,24 +138,24 @@ button.reject {
   font-size: 14px;
 }
 
-.estado {
+.status {
   padding: 2px 8px;
   border-radius: 4px;
   font-size: 12px;
   font-weight: 600;
 }
 
-.estado-en_progreso {
+.status-in_progress {
   background: #fff3cd;
   color: #8a6d00;
 }
 
-.estado-aprobada {
+.status-approved {
   background: #d4edda;
   color: var(--ok);
 }
 
-.estado-rechazada {
+.status-rejected {
   background: #fdecea;
   color: var(--fail);
 }
@@ -189,23 +189,23 @@ th {
   color: white;
 }
 
-.captura-table input {
+.capture-table input {
   width: 100px;
 }
 
-.resultado {
+.result {
   font-weight: 700;
   font-size: 12px;
   padding: 2px 8px;
   border-radius: 4px;
 }
 
-.resultado.ok {
+.result.ok {
   background: #d4edda;
   color: var(--ok);
 }
 
-.resultado.fail {
+.result.fail {
   background: #fdecea;
   color: var(--fail);
 }

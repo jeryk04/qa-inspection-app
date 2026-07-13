@@ -1,172 +1,102 @@
-Documento de Proyecto
+# QA Inspection App — Digital Inspections
 
-**App de Control de Calidad --- Inspecciones Digitales**
+*Project Plan · v1.0*
 
-*Versión 1.0 · Julio 2026*
+## 1. Project Summary
 
-**1. Resumen del Proyecto**
+Quality control is currently handled through Excel inspection sheets,
+stored in folders organized by client and part number. This process
+limits traceability, makes trend analysis difficult, and relies on
+manual, scattered data handling.
 
-Actualmente el control de calidad se realiza mediante hojas de
-inspección en Excel, almacenadas en carpetas organizadas por cliente y
-número de pieza. Este proceso limita la trazabilidad, dificulta el
-análisis de tendencias y depende de un manejo manual y disperso de la
-información.
+The goal is to build a digital application that captures, stores, and
+organizes quality inspections — replacing the paper/Excel process — so
+that all data is centralized, searchable by client and part number, and
+can be used in the future for analysis and trend control.
 
-El objetivo es construir una aplicación digital que capture, almacene y
-organice las inspecciones de calidad --- reemplazando el proceso en
-papel/Excel --- de forma que toda la data quede centralizada, sea
-consultable por cliente y número de pieza, y pueda usarse en el futuro
-para análisis y control de tendencias.
+## 2. Inspection Types Covered
 
-**2. Tipos de Inspección Cubiertos**
+| Inspection Type | Description |
+|---|---|
+| Incoming Inspection | Verification of material or parts received from suppliers. |
+| Set-up Inspection | Validation before starting a production run. |
+| In-Process Inspection | Verification during the production process. |
+| Final Inspection | Final validation before shipping to the client. |
 
-  -----------------------------------------------------------------------
-  **Tipo de Inspección**    **Descripción**
-  ------------------------- ---------------------------------------------
-  Incoming Inspection       Verificación de material o piezas recibidas
-                            de proveedores.
+## 3. Goals and Success Criteria
 
-  Set-up Inspection         Validación antes de iniciar una corrida de
-                            producción.
+- Eliminate the use of paper/Excel inspection sheets.
+- Centralize all inspection information by client and part number.
+- Capture measurements based on Balloon Drawings (drawings with numbered points and their spec/tolerance).
+- Automatically generate the digital inspection sheet (a direct replacement for the physical sheet).
+- Leave the foundation ready for trend analysis and reporting in later phases.
 
-  In-Process Inspection     Verificación durante el proceso de
-                            producción.
+## 4. General Approach
 
-  Final Inspection          Validación final antes de embarque al
-                            cliente.
-  -----------------------------------------------------------------------
+The project will be built in incremental phases, starting with an MVP
+(Minimum Viable Product) focused on a single inspection type, to
+validate the full flow before expanding to the others.
 
-**3. Objetivos y Criterios de Éxito**
+### Phase 1 — MVP: Digital Final Inspection
 
--   Eliminar el uso de hojas de inspección en papel/Excel.
+**In scope:**
+- Measurement capture by balloon number (numbered form).
+- Associating each inspection with a client + part number.
+- Generating and storing the digital inspection sheet.
+- Access from the shop floor (tablet/mobile) and the office (desktop).
+- Inspection history searchable by client/part.
 
--   Centralizar toda la información de inspecciones por cliente y número
-    de pieza.
+**Out of scope (later phases):**
+- Incoming, Set-up, and In-Process Inspections.
+- Trend analysis, reports, and dashboards.
+- Automatic out-of-tolerance alerts.
+- MIE Trak Pro integration.
+- External client access to the system.
 
--   Capturar mediciones basadas en Balloon Drawings (dibujos con puntos
-    numerados y su especificación/tolerancia).
+### Phase 2 — Inspection Expansion
 
--   Generar automáticamente la hoja de inspección digital (reemplazo
-    directo de la hoja física).
+Add Incoming, Set-up, and In-Process Inspections, reusing the foundation
+built in Phase 1 (same data model and capture flow).
 
--   Dejar la base lista para análisis de tendencias y reportes en fases
-    posteriores.
+### Phase 3 — Analysis, Reporting, and Integration
 
-**4. Enfoque General**
+- Trend analysis and historical quality control module.
+- Out-of-tolerance alerts.
+- Evaluate MIE Trak Pro integration to sync client/part data.
 
-El proyecto se construirá en fases incrementales, comenzando con un MVP
-(Producto Mínimo Viable) enfocado en un solo tipo de inspección, para
-validar el flujo completo antes de expandir a las demás.
+## 5. Initial Data Model
 
-**Fase 1 --- MVP: Final Inspection Digital**
+| Entity | Key Fields |
+|---|---|
+| Clients | id, name, contact info |
+| Parts | id, client_id, part number, description |
+| Balloon Drawings | id, part_id, image, list of numbered points with their spec/tolerance |
+| Inspections | id, part_id, type, date, inspector, status |
+| Measurements | id, inspection_id, balloon number, measured value, within tolerance (yes/no) |
 
-**Dentro del alcance:**
+## 6. Suggested Tech Stack
 
--   Captura de medidas por número de balloon (formulario numerado).
+| Component | Recommendation |
+|---|---|
+| Frontend | React (or plain HTML/JS to start lighter) |
+| Backend | Node.js + Express, or Python + FastAPI |
+| Database | SQLite for local development → PostgreSQL in production |
+| Image storage | Local at first → cloud storage (e.g. S3) later |
+| Development environment | Visual Studio Code |
 
--   Asociación de cada inspección a cliente + número de pieza.
+## 7. Task Breakdown — Phase 1 (MVP)
 
--   Generación y almacenamiento de la hoja de inspección digital.
+1. Initial setup: project in VS Code, folder structure, local database.
+2. CRUD for Clients and Parts.
+3. Balloon Drawing upload: upload image and define the list of numbered points with their spec/tolerance.
+4. Inspection capture form: select client → part → capture measured values per balloon number.
+5. Automatic tolerance validation (visual within/out-of-spec indicator).
+6. Generate the digital inspection sheet (view and/or PDF export).
+7. Inspection history and search by client, part, and date.
+8. Testing with real data in parallel with the current process, before retiring paper/Excel.
 
--   Acceso desde planta (tablet/móvil) y desde oficina (escritorio).
+## 8. Notes and Considerations
 
--   Historial de inspecciones consultable por cliente/pieza.
-
-**Fuera de alcance (fases posteriores):**
-
--   Incoming, Set-up e In-Process Inspections.
-
--   Análisis de tendencias, reportes y dashboards.
-
--   Alertas automáticas de mediciones fuera de tolerancia.
-
--   Integración con MIE Trak Pro.
-
--   Acceso de clientes externos al sistema.
-
-**Fase 2 --- Expansión de Inspecciones**
-
-Agregar Incoming, Set-up e In-Process Inspections reutilizando la base
-construida en la Fase 1 (mismo modelo de datos y flujo de captura).
-
-**Fase 3 --- Análisis, Reportes e Integración**
-
--   Módulo de análisis de tendencias y control de calidad histórico.
-
--   Alertas de mediciones fuera de tolerancia.
-
--   Evaluar integración con MIE Trak Pro para sincronizar datos de
-    clientes/piezas.
-
-**5. Modelo de Datos Inicial**
-
-  -----------------------------------------------------------------------
-  **Entidad**           **Campos Clave**
-  --------------------- -------------------------------------------------
-  Clientes              id, nombre, información de contacto
-
-  Piezas                id, cliente_id, número de parte, descripción
-
-  Balloon Drawings      id, pieza_id, imagen, lista de puntos numerados
-                        con su especificación/tolerancia
-
-  Inspecciones          id, pieza_id, tipo, fecha, inspector, estado
-
-  Mediciones            id, inspección_id, número de balloon, valor
-                        medido, dentro de tolerancia (sí/no)
-  -----------------------------------------------------------------------
-
-**6. Stack Tecnológico Sugerido**
-
-  -----------------------------------------------------------------------
-  **Componente**         **Recomendación**
-  ---------------------- ------------------------------------------------
-  Frontend               React (o HTML/JS simple para arrancar más
-                         ligero)
-
-  Backend                Node.js + Express, o Python + FastAPI
-
-  Base de datos          SQLite para desarrollo local → PostgreSQL en
-                         producción
-
-  Almacenamiento de      Local al inicio → almacenamiento en la nube (ej.
-  imágenes               S3) más adelante
-
-  Entorno de desarrollo  Visual Studio Code
-  -----------------------------------------------------------------------
-
-**7. Desglose de Tareas --- Fase 1 (MVP)**
-
-1.  Setup inicial: proyecto en VS Code, estructura de carpetas, base de
-    datos local.
-
-2.  CRUD de Clientes y Piezas.
-
-3.  Carga de Balloon Drawing: subir imagen y definir lista de puntos
-    numerados con su especificación/tolerancia.
-
-4.  Formulario de captura de inspección: selección de cliente → pieza →
-    captura de valores medidos por número de balloon.
-
-5.  Validación automática de tolerancia (indicador visual dentro/fuera
-    de especificación).
-
-6.  Generación de la hoja de inspección digital (vista y/o exportación a
-    PDF).
-
-7.  Historial y búsqueda de inspecciones por cliente, pieza y fecha.
-
-8.  Pruebas con datos reales en paralelo al proceso actual, antes de
-    retirar el papel/Excel.
-
-**8. Notas y Consideraciones**
-
--   No hay fecha límite fija --- el desarrollo se hará de forma
-    iterativa, probando y corrigiendo sobre la marcha.
-
--   Los datos actuales en Excel (organizados por cliente y número de
-    pieza) sirven como referencia directa para el modelo de datos
-    inicial.
-
--   La integración con MIE Trak Pro queda identificada como meta futura,
-    no como bloqueante del MVP.
+- There's no fixed deadline — development will happen iteratively, testing and fixing as it goes.
+- The current Excel data (organized by client and part number) serves as a direct reference for the initial data model.
+- MIE Trak Pro integration is identified as a future goal, not an MVP blocker.

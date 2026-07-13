@@ -14,65 +14,65 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage });
 
-// GET /api/drawings?pieza_id=1
+// GET /api/drawings?part_id=1
 router.get("/", (req, res) => {
-  const { pieza_id } = req.query;
-  const drawings = pieza_id
-    ? db.prepare("SELECT * FROM balloon_drawings WHERE pieza_id = ? ORDER BY version DESC").all(pieza_id)
-    : db.prepare("SELECT * FROM balloon_drawings ORDER BY creado_en DESC").all();
+  const { part_id } = req.query;
+  const drawings = part_id
+    ? db.prepare("SELECT * FROM balloon_drawings WHERE part_id = ? ORDER BY version DESC").all(part_id)
+    : db.prepare("SELECT * FROM balloon_drawings ORDER BY created_at DESC").all();
   res.json(drawings);
 });
 
-// GET /api/drawings/:id  (incluye sus puntos)
+// GET /api/drawings/:id  (includes its points)
 router.get("/:id", (req, res) => {
   const drawing = db.prepare("SELECT * FROM balloon_drawings WHERE id = ?").get(req.params.id);
-  if (!drawing) return res.status(404).json({ error: "Drawing no encontrado" });
+  if (!drawing) return res.status(404).json({ error: "Drawing not found" });
 
-  const puntos = db
-    .prepare("SELECT * FROM balloon_puntos WHERE drawing_id = ? ORDER BY numero_balloon")
+  const points = db
+    .prepare("SELECT * FROM balloon_points WHERE drawing_id = ? ORDER BY balloon_number")
     .all(req.params.id);
 
-  res.json({ ...drawing, puntos });
+  res.json({ ...drawing, points });
 });
 
-// POST /api/drawings  (multipart/form-data: imagen + pieza_id)
-router.post("/", upload.single("imagen"), (req, res) => {
-  const { pieza_id, version } = req.body;
-  if (!pieza_id || !req.file) {
-    return res.status(400).json({ error: "pieza_id e imagen son requeridos" });
+// POST /api/drawings  (multipart/form-data: image + part_id)
+router.post("/", upload.single("image"), (req, res) => {
+  const { part_id, version } = req.body;
+  if (!part_id || !req.file) {
+    return res.status(400).json({ error: "part_id and image are required" });
   }
 
   const result = db
-    .prepare("INSERT INTO balloon_drawings (pieza_id, imagen_path, version) VALUES (?, ?, ?)")
-    .run(pieza_id, `/uploads/${req.file.filename}`, version || 1);
+    .prepare("INSERT INTO balloon_drawings (part_id, image_path, version) VALUES (?, ?, ?)")
+    .run(part_id, `/uploads/${req.file.filename}`, version || 1);
 
   const drawing = db.prepare("SELECT * FROM balloon_drawings WHERE id = ?").get(result.lastInsertRowid);
   res.status(201).json(drawing);
 });
 
-// POST /api/drawings/:id/puntos  (agrega un punto numerado con su especificación)
-router.post("/:id/puntos", (req, res) => {
-  const { numero_balloon, descripcion, valor_nominal, tolerancia_menos, tolerancia_mas, unidad } = req.body;
-  if (!numero_balloon) return res.status(400).json({ error: "numero_balloon es requerido" });
+// POST /api/drawings/:id/points  (adds a numbered point with its specification)
+router.post("/:id/points", (req, res) => {
+  const { balloon_number, description, nominal_value, tolerance_minus, tolerance_plus, unit } = req.body;
+  if (!balloon_number) return res.status(400).json({ error: "balloon_number is required" });
 
   const result = db
     .prepare(
-      `INSERT INTO balloon_puntos
-       (drawing_id, numero_balloon, descripcion, valor_nominal, tolerancia_menos, tolerancia_mas, unidad)
+      `INSERT INTO balloon_points
+       (drawing_id, balloon_number, description, nominal_value, tolerance_minus, tolerance_plus, unit)
        VALUES (?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       req.params.id,
-      numero_balloon,
-      descripcion || null,
-      valor_nominal ?? null,
-      tolerancia_menos ?? null,
-      tolerancia_mas ?? null,
-      unidad || "mm"
+      balloon_number,
+      description || null,
+      nominal_value ?? null,
+      tolerance_minus ?? null,
+      tolerance_plus ?? null,
+      unit || "mm"
     );
 
-  const punto = db.prepare("SELECT * FROM balloon_puntos WHERE id = ?").get(result.lastInsertRowid);
-  res.status(201).json(punto);
+  const point = db.prepare("SELECT * FROM balloon_points WHERE id = ?").get(result.lastInsertRowid);
+  res.status(201).json(point);
 });
 
 module.exports = router;

@@ -1,38 +1,37 @@
 # QA Inspection App
 
-Aplicación para digitalizar el proceso de inspecciones de control de calidad
-(Incoming, Set-up, In-Process, Final), reemplazando las hojas de inspección
-en papel/Excel. Las mediciones se capturan por número de "balloon" (punto
-numerado en el drawing de la pieza) y se almacenan por cliente y número de
-pieza.
+An application to digitize the quality control inspection process
+(Incoming, Set-up, In-Process, Final), replacing paper/Excel inspection
+sheets. Measurements are captured by "balloon" number (a numbered point
+on the part's technical drawing) and stored by client and part number.
 
-Ver `docs/PLAN.md` para el plan de proyecto completo (fases, objetivos,
-modelo de datos, alcance del MVP).
+See `docs/PLAN.md` for the full project plan (phases, goals, data model,
+MVP scope).
 
-## Estructura del repo
+## Repo structure
 
 ```
 qa-inspection-app/
-├── backend/          # API REST (Node.js + Express + SQLite)
+├── backend/          # REST API (Node.js + Express + SQLite)
 │   ├── src/
-│   │   ├── index.js       # entry point del servidor
-│   │   ├── db.js          # conexión y setup de la base de datos
-│   │   ├── schema.sql     # esquema de la base de datos
-│   │   └── routes/        # endpoints por entidad
-│   └── uploads/           # imágenes de balloon drawings subidas
-├── frontend/          # App web (React + Vite)
+│   │   ├── index.js       # server entry point
+│   │   ├── db.js          # database connection and setup
+│   │   ├── schema.sql     # database schema
+│   │   └── routes/        # endpoints per entity
+│   └── uploads/           # uploaded balloon drawing images
+├── frontend/          # Web app (React + Vite)
 │   └── src/
 └── docs/
-    └── PLAN.md         # plan de proyecto (fases, alcance, modelo de datos)
+    └── PLAN.md         # project plan (phases, scope, data model)
 ```
 
-## MVP — Fase 1
+## MVP — Phase 1
 
-Alcance actual: **Final Inspection** digital completa (captura de medidas
-por balloon, asociación a cliente/pieza, generación de hoja de inspección,
-historial). Ver `docs/PLAN.md` para detalle de fases futuras.
+Current scope: a fully digital **Final Inspection** (measurement capture
+by balloon, client/part association, inspection sheet generation,
+history). See `docs/PLAN.md` for the detail on future phases.
 
-## Cómo correr el proyecto localmente
+## Running the project locally
 
 ### Backend
 
@@ -42,9 +41,9 @@ npm install
 npm run dev
 ```
 
-El servidor corre por defecto en `http://localhost:3001`. La primera vez
-que arranca, crea automáticamente la base de datos SQLite (`backend/data.db`)
-usando `src/schema.sql`.
+The server runs on `http://localhost:3001` by default. The first time it
+starts, it automatically creates the SQLite database (`backend/data.db`)
+using `src/schema.sql`.
 
 ### Frontend
 
@@ -54,19 +53,19 @@ npm install
 npm run dev
 ```
 
-La app corre por defecto en `http://localhost:5173` y consume la API del
-backend en `http://localhost:3001`.
+The app runs on `http://localhost:5173` by default and consumes the
+backend API at `http://localhost:3001`.
 
 ## Stack
 
-- **Backend:** Node.js, Express, SQLite (better-sqlite3), Multer (subida de imágenes)
+- **Backend:** Node.js, Express, SQLite (better-sqlite3), Multer (image uploads)
 - **Frontend:** React + Vite
-- **Base de datos:** SQLite en desarrollo → se puede migrar a PostgreSQL en producción
+- **Database:** SQLite in development → can be migrated to PostgreSQL in production
 
-## Trabajando con Claude Code
+## Working with Claude Code
 
-Este repo incluye un archivo `CLAUDE.md` en la raíz con contexto del
-proyecto para que Claude Code lo use automáticamente al trabajar aquí.
-Simplemente abre esta carpeta en VS Code y corre `claude` en la terminal
-integrada (o usa la extensión de Claude Code) para empezar a trabajar
-tarea por tarea sobre el desglose en `docs/PLAN.md`.
+This repo includes a `CLAUDE.md` file at the root with project context
+so Claude Code picks it up automatically when working here. Just open
+this folder in VS Code and run `claude` in the integrated terminal (or
+use the Claude Code extension) to start working task by task through
+the breakdown in `docs/PLAN.md`.

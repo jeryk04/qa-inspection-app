@@ -1,63 +1,63 @@
--- Esquema de base de datos: QA Inspection App
--- Ver docs/PLAN.md sección 5 para el modelo de datos original.
+-- Database schema: QA Inspection App
+-- See docs/PLAN.md section 5 for the original data model.
 
-CREATE TABLE IF NOT EXISTS clientes (
+CREATE TABLE IF NOT EXISTS clients (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  nombre        TEXT NOT NULL,
-  contacto      TEXT,
-  creado_en     TEXT NOT NULL DEFAULT (datetime('now'))
+  name          TEXT NOT NULL,
+  contact       TEXT,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE TABLE IF NOT EXISTS piezas (
+CREATE TABLE IF NOT EXISTS parts (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  cliente_id    INTEGER NOT NULL REFERENCES clientes(id) ON DELETE CASCADE,
-  numero_parte  TEXT NOT NULL,
-  descripcion   TEXT,
-  creado_en     TEXT NOT NULL DEFAULT (datetime('now')),
-  UNIQUE(cliente_id, numero_parte)
+  client_id     INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+  part_number   TEXT NOT NULL,
+  description   TEXT,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(client_id, part_number)
 );
 
 CREATE TABLE IF NOT EXISTS balloon_drawings (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  pieza_id      INTEGER NOT NULL REFERENCES piezas(id) ON DELETE CASCADE,
-  imagen_path   TEXT NOT NULL,
+  part_id       INTEGER NOT NULL REFERENCES parts(id) ON DELETE CASCADE,
+  image_path    TEXT NOT NULL,
   version       INTEGER NOT NULL DEFAULT 1,
-  creado_en     TEXT NOT NULL DEFAULT (datetime('now'))
+  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- Cada punto numerado ("balloon") dentro de un drawing, con su especificación.
-CREATE TABLE IF NOT EXISTS balloon_puntos (
+-- Each numbered "balloon" point within a drawing, with its specification.
+CREATE TABLE IF NOT EXISTS balloon_points (
   id                INTEGER PRIMARY KEY AUTOINCREMENT,
   drawing_id        INTEGER NOT NULL REFERENCES balloon_drawings(id) ON DELETE CASCADE,
-  numero_balloon    INTEGER NOT NULL,
-  descripcion       TEXT,
-  valor_nominal     REAL,
-  tolerancia_menos  REAL,
-  tolerancia_mas    REAL,
-  unidad            TEXT DEFAULT 'mm',
-  UNIQUE(drawing_id, numero_balloon)
+  balloon_number    INTEGER NOT NULL,
+  description       TEXT,
+  nominal_value     REAL,
+  tolerance_minus   REAL,
+  tolerance_plus    REAL,
+  unit              TEXT DEFAULT 'mm',
+  UNIQUE(drawing_id, balloon_number)
 );
 
-CREATE TABLE IF NOT EXISTS inspecciones (
+CREATE TABLE IF NOT EXISTS inspections (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  pieza_id      INTEGER NOT NULL REFERENCES piezas(id) ON DELETE CASCADE,
+  part_id       INTEGER NOT NULL REFERENCES parts(id) ON DELETE CASCADE,
   drawing_id    INTEGER REFERENCES balloon_drawings(id),
-  tipo          TEXT NOT NULL CHECK (tipo IN ('incoming', 'setup', 'in_process', 'final')),
+  type          TEXT NOT NULL CHECK (type IN ('incoming', 'setup', 'in_process', 'final')),
   inspector     TEXT,
-  fecha         TEXT NOT NULL DEFAULT (datetime('now')),
-  estado        TEXT NOT NULL DEFAULT 'en_progreso' CHECK (estado IN ('en_progreso', 'aprobada', 'rechazada')),
-  notas         TEXT
+  date          TEXT NOT NULL DEFAULT (datetime('now')),
+  status        TEXT NOT NULL DEFAULT 'in_progress' CHECK (status IN ('in_progress', 'approved', 'rejected')),
+  notes         TEXT
 );
 
-CREATE TABLE IF NOT EXISTS mediciones (
-  id               INTEGER PRIMARY KEY AUTOINCREMENT,
-  inspeccion_id    INTEGER NOT NULL REFERENCES inspecciones(id) ON DELETE CASCADE,
-  balloon_punto_id INTEGER NOT NULL REFERENCES balloon_puntos(id),
-  valor_medido     REAL,
-  dentro_tolerancia INTEGER, -- 0/1, calculado al guardar
-  UNIQUE(inspeccion_id, balloon_punto_id)
+CREATE TABLE IF NOT EXISTS measurements (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  inspection_id     INTEGER NOT NULL REFERENCES inspections(id) ON DELETE CASCADE,
+  balloon_point_id  INTEGER NOT NULL REFERENCES balloon_points(id),
+  measured_value    REAL,
+  within_tolerance  INTEGER, -- 0/1, computed on save
+  UNIQUE(inspection_id, balloon_point_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_piezas_cliente ON piezas(cliente_id);
-CREATE INDEX IF NOT EXISTS idx_inspecciones_pieza ON inspecciones(pieza_id);
-CREATE INDEX IF NOT EXISTS idx_mediciones_inspeccion ON mediciones(inspeccion_id);
+CREATE INDEX IF NOT EXISTS idx_parts_client ON parts(client_id);
+CREATE INDEX IF NOT EXISTS idx_inspections_part ON inspections(part_id);
+CREATE INDEX IF NOT EXISTS idx_measurements_inspection ON measurements(inspection_id);
