@@ -16,12 +16,29 @@ UI flow should only cover Final Inspection for now.
 See `docs/PLAN.md` for the full phase plan and scope detail.
 
 ## Data model (already defined in backend/src/schema.sql)
+This mirrors the company's real paper Data Sheet: each inspection is a
+grid of **samples (sample_number) × balloon points (Find #)**, not a
+single value per point.
+
 - `clients` — the company's clients
 - `parts` — parts, each associated with a client
 - `balloon_drawings` — the technical drawing image for a part
-- `balloon_points` — each numbered point on the drawing, with its spec/tolerance
-- `inspections` — a performed inspection (type, part, date, inspector, status)
-- `measurements` — the measured value for each balloon point in an inspection
+- `balloon_points` — each numbered "Find #" on the drawing, with
+  `max_spec` / `min_spec` / `mean_value` (matches the Max Spec / Min
+  Spec / MEAN rows on the paper sheet)
+- `inspections` — a performed inspection: `type` (quote/incoming/setup/
+  in_process/final/other — Phase 1 UI only creates `final`), part,
+  date, inspector, status, plus the full paper header: `customer`,
+  `heat`, `quantity`, `supplier`, `po_number`, `customer_po_number`,
+  `operation`, `job_number`, `sampling_plan_n`, `sampling_plan_c`,
+  `lot_disposition`
+- `measurements` — one cell of the sample × Find# grid: `balloon_point_id`
+  + `sample_number` + measured value + computed within-tolerance flag
+  (unique per inspection+point+sample)
+
+The inspection sheet can be exported as a PDF that visually replicates
+the paper Data Sheet (`GET /api/inspections/:id/pdf`, built with
+`pdfkit` — see `backend/src/pdf/inspectionSheet.js`).
 
 ## Repo conventions
 - Backend: Express, REST routes under `/api/...`, one route file per entity in `backend/src/routes/`.

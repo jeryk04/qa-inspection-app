@@ -49,6 +49,70 @@ body {
   opacity: 1;
 }
 
+.nav-user {
+  color: white;
+  opacity: 0.85;
+  font-size: 14px;
+}
+
+.type-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 16px;
+  margin-top: 20px;
+}
+
+.type-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: white;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 24px;
+  text-decoration: none;
+  color: var(--primary);
+  font-size: 16px;
+  transition: box-shadow 0.15s ease;
+}
+
+.type-card:hover {
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
+}
+
+.type-card-disabled {
+  color: #9aa4b2;
+  cursor: not-allowed;
+}
+
+.type-card-badge {
+  align-self: flex-start;
+  font-size: 11px;
+  font-weight: 600;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 8px;
+}
+
+.login-page {
+  max-width: 360px;
+  margin: 80px auto 0;
+}
+
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 16px;
+}
+
+.login-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
 .page {
   max-width: 880px;
   margin: 0 auto;
@@ -228,6 +292,50 @@ th {
   width: 100px;
 }
 
+.input-out-of-tolerance {
+  border-color: var(--fail);
+  background: #fdecea;
+}
+
+.header-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 10px;
+  margin: 12px 0;
+}
+
+.header-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12px;
+}
+
+.header-field input {
+  width: 100%;
+}
+
+.table-scroll {
+  overflow-x: auto;
+}
+
+.sign-panel {
+  background: #fff3cd;
+  border: 1px solid #e0c46c;
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin: 16px 0;
+}
+
+.audit-log {
+  list-style: none;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+}
+
 .result {
   font-weight: 700;
   font-size: 12px;
@@ -268,6 +376,11 @@ th {
 .sheet-table th,
 .sheet-table td {
   font-size: 13px;
+}
+
+.sheet-cell-fail {
+  color: var(--fail);
+  font-weight: 700;
 }
 
 .sheet-signature {

@@ -1,7 +1,25 @@
 const express = require("express");
 const db = require("../db");
+const { generateInspectionPdf } = require("../pdf/inspectionSheet");
+const { recordAudit } = require("../lib/audit");
 
 const router = express.Router();
+
+const HEADER_FIELDS = [
+  "customer",
+  "heat",
+  "quantity",
+  "supplier",
+  "po_number",
+  "customer_po_number",
+  "operation",
+  "job_number",
+  "inspector",
+  "sampling_plan_n",
+  "sampling_plan_c",
+  "lot_disposition",
+  "notes",
+];
 
 // GET /api/inspections?part_id=1&type=final&client_id=1&status=approved&date_from=2026-01-01&date_to=2026-12-31
 router.get("/", (req, res) => {
@@ -45,8 +63,7 @@ router.get("/", (req, res) => {
   res.json(db.prepare(query).all(...params));
 });
 
-// GET /api/inspections/:id  (includes measurements + specs for each balloon)
-router.get("/:id", (req, res) => {
+function getInspectionDetail(id) {
   const inspection = db
     .prepare(
       `SELECT i.*, p.part_number, p.description AS part_description, p.client_id,
@@ -56,67 +73,153 @@ router.get("/:id", (req, res) => {
        JOIN clients c ON c.id = p.client_id
        WHERE i.id = ?`
     )
-    .get(req.params.id);
-  if (!inspection) return res.status(404).json({ error: "Inspection not found" });
+    .get(id);
+  if (!inspection) return null;
 
   const measurements = db
     .prepare(
-      `SELECT m.*, bp.balloon_number, bp.description, bp.nominal_value,
-              bp.tolerance_minus, bp.tolerance_plus, bp.unit
+      `SELECT m.*, bp.balloon_number, bp.description, bp.max_spec,
+              bp.min_spec, bp.mean_value, bp.unit
        FROM measurements m
        JOIN balloon_points bp ON bp.id = m.balloon_point_id
        WHERE m.inspection_id = ?
-       ORDER BY bp.balloon_number`
+       ORDER BY bp.balloon_number, m.sample_number`
     )
-    .all(req.params.id);
+    .all(id);
 
-  res.json({ ...inspection, measurements });
+  return { ...inspection, measurements };
+}
+
+// GET /api/inspections/:id  (includes measurements + specs for each balloon)
+router.get("/:id", (req, res) => {
+  const inspection = getInspectionDetail(req.params.id);
+  if (!inspection) return res.status(404).json({ error: "Inspection not found" });
+  res.json(inspection);
 });
 
-// POST /api/inspections  (creates the inspection; body: part_id, drawing_id, type, inspector)
+// GET /api/inspections/:id/audit  (chronological trail: audit_log + signatures, joined to users)
+router.get("/:id/audit", (req, res) => {
+  const entries = db
+    .prepare(
+      `SELECT a.id, a.action, a.details, a.created_at AS at, u.full_name AS user_name
+       FROM audit_log a
+       LEFT JOIN users u ON u.id = a.user_id
+       WHERE a.entity_type = 'inspection' AND a.entity_id = ?
+       UNION ALL
+       SELECT s.id, ('signed_' || s.action) AS action, NULL AS details, s.signed_at AS at, u.full_name AS user_name
+       FROM signatures s
+       LEFT JOIN users u ON u.id = s.user_id
+       WHERE s.inspection_id = ?
+       ORDER BY at ASC`
+    )
+    .all(req.params.id, req.params.id);
+
+  res.json(
+    entries.map((e) => ({ ...e, details: e.details ? JSON.parse(e.details) : null }))
+  );
+});
+
+// POST /api/inspections  (creates the inspection; body: part_id, drawing_id, type + optional header fields)
 router.post("/", (req, res) => {
-  const { part_id, drawing_id, type, inspector, notes } = req.body;
+  const { part_id, drawing_id, type } = req.body;
   if (!part_id || !type) return res.status(400).json({ error: "part_id and type are required" });
+
+  const columns = ["part_id", "drawing_id", "type", "created_by", "updated_by", ...HEADER_FIELDS];
+  const values = [
+    part_id,
+    drawing_id || null,
+    type,
+    req.user.id,
+    req.user.id,
+    ...HEADER_FIELDS.map((f) => req.body[f] ?? null),
+  ];
 
   const result = db
     .prepare(
-      "INSERT INTO inspections (part_id, drawing_id, type, inspector, notes) VALUES (?, ?, ?, ?, ?)"
+      `INSERT INTO inspections (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`
     )
-    .run(part_id, drawing_id || null, type, inspector || null, notes || null);
+    .run(...values);
+
+  recordAudit("inspection", result.lastInsertRowid, "created", req.user.id, { type, part_id });
 
   const inspection = db.prepare("SELECT * FROM inspections WHERE id = ?").get(result.lastInsertRowid);
   res.status(201).json(inspection);
 });
 
+// PUT /api/inspections/:id  (updates header fields: customer, heat, quantity, supplier,
+// po_number, customer_po_number, operation, job_number, inspector, sampling plan, lot_disposition, notes)
+router.put("/:id", (req, res) => {
+  const existing = db.prepare("SELECT * FROM inspections WHERE id = ?").get(req.params.id);
+  if (!existing) return res.status(404).json({ error: "Inspection not found" });
+
+  const changes = {};
+  HEADER_FIELDS.forEach((f) => {
+    if (req.body[f] !== undefined && req.body[f] !== existing[f]) {
+      changes[f] = { old: existing[f], new: req.body[f] };
+    }
+  });
+
+  const setClauses = HEADER_FIELDS.map((f) => `${f} = COALESCE(@${f}, ${f})`).join(", ");
+  const values = { id: req.params.id, updated_by: req.user.id };
+  HEADER_FIELDS.forEach((f) => {
+    values[f] = req.body[f] ?? null;
+  });
+
+  db.prepare(`UPDATE inspections SET ${setClauses}, updated_by = @updated_by WHERE id = @id`).run(values);
+
+  if (Object.keys(changes).length > 0) {
+    recordAudit("inspection", req.params.id, "header_updated", req.user.id, changes);
+  }
+
+  res.json(db.prepare("SELECT * FROM inspections WHERE id = ?").get(req.params.id));
+});
+
 // PUT /api/inspections/:id/measurements  (saves/updates measurements in batch)
-// body: { measurements: [{ balloon_point_id, measured_value }, ...] }
+// body: { measurements: [{ balloon_point_id, sample_number, measured_value }, ...] }
 router.put("/:id/measurements", (req, res) => {
   const { measurements } = req.body;
   if (!Array.isArray(measurements)) return res.status(400).json({ error: "measurements must be an array" });
 
+  const getExisting = db.prepare(
+    "SELECT measured_value FROM measurements WHERE inspection_id = ? AND balloon_point_id = ? AND sample_number = ?"
+  );
+
   const upsert = db.prepare(`
-    INSERT INTO measurements (inspection_id, balloon_point_id, measured_value, within_tolerance)
-    VALUES (@inspection_id, @balloon_point_id, @measured_value, @within_tolerance)
-    ON CONFLICT(inspection_id, balloon_point_id)
+    INSERT INTO measurements (inspection_id, balloon_point_id, sample_number, measured_value, within_tolerance)
+    VALUES (@inspection_id, @balloon_point_id, @sample_number, @measured_value, @within_tolerance)
+    ON CONFLICT(inspection_id, balloon_point_id, sample_number)
     DO UPDATE SET measured_value = excluded.measured_value, within_tolerance = excluded.within_tolerance
   `);
 
   const getPoint = db.prepare("SELECT * FROM balloon_points WHERE id = ?");
 
+  const changes = [];
+
   const tx = db.transaction((items) => {
     for (const item of items) {
       const point = getPoint.get(item.balloon_point_id);
+      const sampleNumber = item.sample_number ?? 1;
       let withinTolerance = null;
 
-      if (point && point.nominal_value != null && item.measured_value != null) {
-        const min = point.nominal_value - (point.tolerance_minus ?? 0);
-        const max = point.nominal_value + (point.tolerance_plus ?? 0);
-        withinTolerance = item.measured_value >= min && item.measured_value <= max ? 1 : 0;
+      if (point && point.min_spec != null && point.max_spec != null && item.measured_value != null) {
+        withinTolerance =
+          item.measured_value >= point.min_spec && item.measured_value <= point.max_spec ? 1 : 0;
+      }
+
+      const existing = getExisting.get(req.params.id, item.balloon_point_id, sampleNumber);
+      if (!existing || existing.measured_value !== item.measured_value) {
+        changes.push({
+          balloon_number: point?.balloon_number,
+          sample_number: sampleNumber,
+          old_value: existing?.measured_value ?? null,
+          new_value: item.measured_value,
+        });
       }
 
       upsert.run({
         inspection_id: req.params.id,
         balloon_point_id: item.balloon_point_id,
+        sample_number: sampleNumber,
         measured_value: item.measured_value,
         within_tolerance: withinTolerance,
       });
@@ -125,26 +228,67 @@ router.put("/:id/measurements", (req, res) => {
 
   tx(measurements);
 
+  if (changes.length > 0) {
+    recordAudit("inspection", req.params.id, "measurements_saved", req.user.id, { changes });
+  }
+
   const updated = db
     .prepare(
       `SELECT m.*, bp.balloon_number FROM measurements m
        JOIN balloon_points bp ON bp.id = m.balloon_point_id
-       WHERE m.inspection_id = ? ORDER BY bp.balloon_number`
+       WHERE m.inspection_id = ? ORDER BY bp.balloon_number, m.sample_number`
     )
     .all(req.params.id);
 
   res.json(updated);
 });
 
-// PUT /api/inspections/:id/status  (approve/reject)
+// PUT /api/inspections/:id/status  (approve/reject, requires an electronic-signature confirmation)
+// body: { status: 'approved' | 'rejected', signer_name: string }
 router.put("/:id/status", (req, res) => {
-  const { status } = req.body;
-  if (!["in_progress", "approved", "rejected"].includes(status)) {
-    return res.status(400).json({ error: "invalid status" });
+  const { status, signer_name } = req.body;
+  if (!["approved", "rejected"].includes(status)) {
+    return res.status(400).json({ error: "status must be 'approved' or 'rejected'" });
   }
-  db.prepare("UPDATE inspections SET status = ? WHERE id = ?").run(status, req.params.id);
+  if (!signer_name || signer_name.trim().toLowerCase() !== req.user.full_name.trim().toLowerCase()) {
+    return res.status(400).json({ error: "signer_name must match your logged-in full name to sign" });
+  }
+
+  const tx = db.transaction(() => {
+    db.prepare("UPDATE inspections SET status = ?, updated_by = ? WHERE id = ?").run(
+      status,
+      req.user.id,
+      req.params.id
+    );
+    db.prepare("INSERT INTO signatures (inspection_id, user_id, action) VALUES (?, ?, ?)").run(
+      req.params.id,
+      req.user.id,
+      status
+    );
+    recordAudit("inspection", req.params.id, "status_changed", req.user.id, { status });
+  });
+  tx();
+
   const inspection = db.prepare("SELECT * FROM inspections WHERE id = ?").get(req.params.id);
   res.json(inspection);
+});
+
+// GET /api/inspections/:id/pdf  (renders the Data Sheet as a downloadable PDF)
+router.get("/:id/pdf", (req, res) => {
+  const inspection = getInspectionDetail(req.params.id);
+  if (!inspection) return res.status(404).json({ error: "Inspection not found" });
+
+  const signature = db
+    .prepare(
+      `SELECT s.action, s.signed_at, u.full_name
+       FROM signatures s JOIN users u ON u.id = s.user_id
+       WHERE s.inspection_id = ? ORDER BY s.signed_at DESC LIMIT 1`
+    )
+    .get(inspection.id);
+
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", `inline; filename="inspection-${inspection.id}.pdf"`);
+  generateInspectionPdf(res, { ...inspection, signature });
 });
 
 module.exports = router;

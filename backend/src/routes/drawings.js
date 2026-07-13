@@ -52,22 +52,22 @@ router.post("/", upload.single("image"), (req, res) => {
 
 // POST /api/drawings/:id/points  (adds a numbered point with its specification)
 router.post("/:id/points", (req, res) => {
-  const { balloon_number, description, nominal_value, tolerance_minus, tolerance_plus, unit } = req.body;
+  const { balloon_number, description, max_spec, min_spec, mean_value, unit } = req.body;
   if (!balloon_number) return res.status(400).json({ error: "balloon_number is required" });
 
   const result = db
     .prepare(
       `INSERT INTO balloon_points
-       (drawing_id, balloon_number, description, nominal_value, tolerance_minus, tolerance_plus, unit)
+       (drawing_id, balloon_number, description, max_spec, min_spec, mean_value, unit)
        VALUES (?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       req.params.id,
       balloon_number,
       description || null,
-      nominal_value ?? null,
-      tolerance_minus ?? null,
-      tolerance_plus ?? null,
+      max_spec ?? null,
+      min_spec ?? null,
+      mean_value ?? null,
       unit || "mm"
     );
 

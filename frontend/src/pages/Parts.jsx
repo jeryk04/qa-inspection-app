@@ -13,7 +13,9 @@ export default function Parts() {
     api.getParts(clientId).then(setParts).catch((e) => setError(e.message));
   };
 
-  useEffect(load, [clientId]);
+  useEffect(() => {
+    load();
+  }, [clientId]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();

@@ -64,15 +64,24 @@ built in Phase 1 (same data model and capture flow).
 - Out-of-tolerance alerts.
 - Evaluate MIE Trak Pro integration to sync client/part data.
 
-## 5. Initial Data Model
+## 5. Data Model
+
+Reflects the company's actual paper Data Sheet: each inspection is a
+grid of samples (pieces inspected) × balloon points (Find #), not a
+single value per point.
 
 | Entity | Key Fields |
 |---|---|
 | Clients | id, name, contact info |
 | Parts | id, client_id, part number, description |
-| Balloon Drawings | id, part_id, image, list of numbered points with their spec/tolerance |
-| Inspections | id, part_id, type, date, inspector, status |
-| Measurements | id, inspection_id, balloon number, measured value, within tolerance (yes/no) |
+| Balloon Drawings | id, part_id, image, list of numbered Find # points |
+| Balloon Points | id, drawing_id, balloon_number (Find #), description, max_spec, min_spec, mean_value, unit |
+| Inspections | id, part_id, type, date, inspector, status, notes, customer, heat, quantity, supplier, po_number, customer_po_number, operation, job_number, sampling_plan_n, sampling_plan_c, lot_disposition |
+| Measurements | id, inspection_id, balloon_point_id, sample_number, measured value, within tolerance (yes/no) |
+
+The digital inspection sheet can be exported as a PDF that visually
+replicates the paper Data Sheet (logo, type checkboxes, header fields,
+and the Find # × sample grid).
 
 ## 6. Suggested Tech Stack
 

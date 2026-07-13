@@ -12,9 +12,9 @@ export default function DrawingSetup() {
 
   const [number, setNumber] = useState("");
   const [description, setDescription] = useState("");
-  const [nominal, setNominal] = useState("");
-  const [tolMinus, setTolMinus] = useState("");
-  const [tolPlus, setTolPlus] = useState("");
+  const [maxSpec, setMaxSpec] = useState("");
+  const [minSpec, setMinSpec] = useState("");
+  const [meanValue, setMeanValue] = useState("");
 
   const load = async () => {
     try {
@@ -28,7 +28,9 @@ export default function DrawingSetup() {
     }
   };
 
-  useEffect(load, [partId]);
+  useEffect(() => {
+    load();
+  }, [partId]);
 
   const handleUpload = async (e) => {
     e.preventDefault();
@@ -52,15 +54,15 @@ export default function DrawingSetup() {
       await api.addPoint(drawing.id, {
         balloon_number: Number(number),
         description,
-        nominal_value: nominal ? Number(nominal) : null,
-        tolerance_minus: tolMinus ? Number(tolMinus) : null,
-        tolerance_plus: tolPlus ? Number(tolPlus) : null,
+        max_spec: maxSpec ? Number(maxSpec) : null,
+        min_spec: minSpec ? Number(minSpec) : null,
+        mean_value: meanValue ? Number(meanValue) : null,
       });
       setNumber("");
       setDescription("");
-      setNominal("");
-      setTolMinus("");
-      setTolPlus("");
+      setMaxSpec("");
+      setMinSpec("");
+      setMeanValue("");
       load();
     } catch (e) {
       setError(e.message);
@@ -90,23 +92,24 @@ export default function DrawingSetup() {
             className="drawing-preview"
           />
 
-          <h2>Numbered points ({drawing.points.length})</h2>
+          <h2>Numbered points — Find # ({drawing.points.length})</h2>
           <form className="point-form" onSubmit={handleAddPoint}>
-            <input placeholder="# balloon" type="number" value={number} onChange={(e) => setNumber(e.target.value)} />
+            <input placeholder="Find #" type="number" value={number} onChange={(e) => setNumber(e.target.value)} />
             <input placeholder="Description" value={description} onChange={(e) => setDescription(e.target.value)} />
-            <input placeholder="Nominal" type="number" step="any" value={nominal} onChange={(e) => setNominal(e.target.value)} />
-            <input placeholder="Tol. -" type="number" step="any" value={tolMinus} onChange={(e) => setTolMinus(e.target.value)} />
-            <input placeholder="Tol. +" type="number" step="any" value={tolPlus} onChange={(e) => setTolPlus(e.target.value)} />
+            <input placeholder="Max Spec" type="number" step="any" value={maxSpec} onChange={(e) => setMaxSpec(e.target.value)} />
+            <input placeholder="Mean" type="number" step="any" value={meanValue} onChange={(e) => setMeanValue(e.target.value)} />
+            <input placeholder="Min Spec" type="number" step="any" value={minSpec} onChange={(e) => setMinSpec(e.target.value)} />
             <button type="submit">+ Add point</button>
           </form>
 
           <table className="points-table">
             <thead>
               <tr>
-                <th>#</th>
+                <th>Find #</th>
                 <th>Description</th>
-                <th>Nominal</th>
-                <th>Tolerance</th>
+                <th>Max Spec</th>
+                <th>Mean</th>
+                <th>Min Spec</th>
               </tr>
             </thead>
             <tbody>
@@ -114,10 +117,9 @@ export default function DrawingSetup() {
                 <tr key={p.id}>
                   <td>{p.balloon_number}</td>
                   <td>{p.description}</td>
-                  <td>{p.nominal_value ?? "—"}</td>
-                  <td>
-                    {p.nominal_value != null ? `± ${p.tolerance_minus ?? 0} / ${p.tolerance_plus ?? 0} ${p.unit}` : "—"}
-                  </td>
+                  <td>{p.max_spec ?? "—"}</td>
+                  <td>{p.mean_value ?? "—"}</td>
+                  <td>{p.min_spec ?? "—"}</td>
                 </tr>
               ))}
             </tbody>

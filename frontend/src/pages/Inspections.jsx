@@ -11,11 +11,13 @@ export default function Inspections() {
   const [creating, setCreating] = useState(false);
 
   const load = () => {
-    api.getInspections({ part_id: partId }).then(setInspections).catch((e) => setError(e.message));
+    api.getInspections({ part_id: partId, type: "final" }).then(setInspections).catch((e) => setError(e.message));
     api.getDrawings(partId).then(setDrawings).catch((e) => setError(e.message));
   };
 
-  useEffect(load, [partId]);
+  useEffect(() => {
+    load();
+  }, [partId]);
 
   const createInspection = async () => {
     if (drawings.length === 0) {

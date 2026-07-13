@@ -1,4 +1,7 @@
-import { BrowserRouter, Routes, Route, Navigate, Link } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate, Link, useLocation } from "react-router-dom";
+import { AuthProvider, useAuth } from "./context/AuthContext";
+import Home from "./pages/Home";
+import Login from "./pages/Login";
 import Clients from "./pages/Clients";
 import Parts from "./pages/Parts";
 import Inspections from "./pages/Inspections";
@@ -8,30 +11,122 @@ import InspectionSheet from "./pages/InspectionSheet";
 import InspectionHistory from "./pages/InspectionHistory";
 import "./App.css";
 
-export default function App() {
+function RequireAuth({ children }) {
+  const { user, loading } = useAuth();
+  const location = useLocation();
+
+  if (loading) {
+    return (
+      <div className="page">
+        <p>Loading...</p>
+      </div>
+    );
+  }
+  if (!user) {
+    return <Navigate to="/login" state={{ from: location.pathname }} replace />;
+  }
+  return children;
+}
+
+function AppShell() {
+  const { user, logout } = useAuth();
+
   return (
-    <BrowserRouter>
+    <>
       <header className="app-header">
-        <Link to="/clients" className="brand">
+        <Link to="/" className="brand">
           QA Inspection App
         </Link>
-        <nav className="main-nav">
-          <Link to="/clients">Clients</Link>
-          <Link to="/history">History</Link>
-        </nav>
+        {user && (
+          <nav className="main-nav">
+            <Link to="/clients">Clients</Link>
+            <Link to="/history">History</Link>
+            <span className="nav-user">{user.full_name}</span>
+            <button className="secondary-btn" onClick={() => logout()}>
+              Logout
+            </button>
+          </nav>
+        )}
       </header>
       <main>
         <Routes>
-          <Route path="/" element={<Navigate to="/clients" replace />} />
-          <Route path="/clients" element={<Clients />} />
-          <Route path="/clients/:clientId/parts" element={<Parts />} />
-          <Route path="/parts/:partId/inspections" element={<Inspections />} />
-          <Route path="/parts/:partId/drawing" element={<DrawingSetup />} />
-          <Route path="/inspections/:inspectionId" element={<InspectionCapture />} />
-          <Route path="/inspections/:inspectionId/sheet" element={<InspectionSheet />} />
-          <Route path="/history" element={<InspectionHistory />} />
+          <Route path="/login" element={<Login />} />
+          <Route
+            path="/"
+            element={
+              <RequireAuth>
+                <Home />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/clients"
+            element={
+              <RequireAuth>
+                <Clients />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/clients/:clientId/parts"
+            element={
+              <RequireAuth>
+                <Parts />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/parts/:partId/inspections"
+            element={
+              <RequireAuth>
+                <Inspections />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/parts/:partId/drawing"
+            element={
+              <RequireAuth>
+                <DrawingSetup />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/inspections/:inspectionId"
+            element={
+              <RequireAuth>
+                <InspectionCapture />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/inspections/:inspectionId/sheet"
+            element={
+              <RequireAuth>
+                <InspectionSheet />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/history"
+            element={
+              <RequireAuth>
+                <InspectionHistory />
+              </RequireAuth>
+            }
+          />
         </Routes>
       </main>
+    </>
+  );
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <AuthProvider>
+        <AppShell />
+      </AuthProvider>
     </BrowserRouter>
   );
 }

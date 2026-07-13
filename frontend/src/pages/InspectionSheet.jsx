@@ -23,8 +23,11 @@ export default function InspectionSheet() {
   if (error) return <p className="error">{error}</p>;
   if (!inspection) return <p>Loading...</p>;
 
-  const measurementsByPoint = Object.fromEntries(inspection.measurements.map((m) => [m.balloon_point_id, m]));
-  const points = drawing?.points ?? inspection.measurements;
+  const points = drawing?.points ?? [];
+  const samples = [...new Set(inspection.measurements.map((m) => m.sample_number))].sort((a, b) => a - b);
+  const grid = Object.fromEntries(
+    inspection.measurements.map((m) => [`${m.balloon_point_id}:${m.sample_number}`, m])
+  );
 
   return (
     <div className="page sheet-page">
@@ -37,35 +40,59 @@ export default function InspectionSheet() {
 
       <div className="sheet">
         <header className="sheet-header">
-          <h1>Final Inspection Report</h1>
+          <h1>Final Inspection Data Sheet</h1>
           <table className="sheet-meta">
             <tbody>
               <tr>
                 <td>
-                  <strong>Client:</strong> {inspection.client_name}
+                  <strong>Part #:</strong> {inspection.part_number}
                 </td>
                 <td>
-                  <strong>Part number:</strong> {inspection.part_number}
+                  <strong>Heat:</strong> {inspection.heat || "—"}
+                </td>
+                <td>
+                  <strong>Quantity:</strong> {inspection.quantity ?? "—"}
+                </td>
+                <td>
+                  <strong>Supplier:</strong> {inspection.supplier || "—"}
+                </td>
+                <td>
+                  <strong>PO#:</strong> {inspection.po_number || "—"}
                 </td>
               </tr>
               <tr>
                 <td>
-                  <strong>Description:</strong> {inspection.part_description || "—"}
+                  <strong>Operation:</strong> {inspection.operation || "—"}
                 </td>
                 <td>
-                  <strong>Inspection #:</strong> {inspection.id}
+                  <strong>Job#:</strong> {inspection.job_number || "—"}
+                </td>
+                <td>
+                  <strong>Customer:</strong> {inspection.customer || inspection.client_name}
+                </td>
+                <td colSpan={2}>
+                  <strong>Customer PO#:</strong> {inspection.customer_po_number || "—"}
                 </td>
               </tr>
               <tr>
                 <td>
-                  <strong>Inspector:</strong> {inspection.inspector || "—"}
+                  <strong>Sampling Plan n=</strong> {inspection.sampling_plan_n ?? "—"}
+                </td>
+                <td>
+                  <strong>c=</strong> {inspection.sampling_plan_c ?? "—"}
+                </td>
+                <td>
+                  <strong>Lot Disposition:</strong> {inspection.lot_disposition || "—"}
+                </td>
+                <td>
+                  <strong>By:</strong> {inspection.inspector || "—"}
                 </td>
                 <td>
                   <strong>Date:</strong> {inspection.date}
                 </td>
               </tr>
               <tr>
-                <td colSpan={2}>
+                <td colSpan={5}>
                   <strong>Result:</strong>{" "}
                   <span className={`status status-${inspection.status}`}>{inspection.status}</span>
                 </td>
@@ -74,38 +101,52 @@ export default function InspectionSheet() {
           </table>
         </header>
 
-        <table className="sheet-table">
-          <thead>
-            <tr>
-              <th>#</th>
-              <th>Description</th>
-              <th>Nominal</th>
-              <th>Tolerance</th>
-              <th>Measured</th>
-              <th>Result</th>
-            </tr>
-          </thead>
-          <tbody>
-            {points.map((p) => {
-              const measurement = measurementsByPoint[p.id] ?? p;
-              const within = measurement?.within_tolerance;
-              return (
-                <tr key={p.id ?? p.balloon_point_id}>
-                  <td>{p.balloon_number}</td>
-                  <td>{p.description}</td>
-                  <td>{p.nominal_value ?? "—"}</td>
-                  <td>{p.nominal_value != null ? `± ${p.tolerance_minus ?? 0} / ${p.tolerance_plus ?? 0} ${p.unit ?? ""}` : "—"}</td>
-                  <td>{measurement?.measured_value ?? "—"}</td>
-                  <td>
-                    {within === 1 && <span className="result ok">OK</span>}
-                    {within === 0 && <span className="result fail">OUT</span>}
-                    {(within === null || within === undefined) && "—"}
-                  </td>
+        <div className="table-scroll">
+          <table className="sheet-table">
+            <thead>
+              <tr>
+                <th>Find #</th>
+                {points.map((p) => (
+                  <th key={p.id}>{p.balloon_number}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Max. Spec.</td>
+                {points.map((p) => (
+                  <td key={p.id}>{p.max_spec ?? "—"}</td>
+                ))}
+              </tr>
+              <tr>
+                <td>MEAN</td>
+                {points.map((p) => (
+                  <td key={p.id}>{p.mean_value ?? "—"}</td>
+                ))}
+              </tr>
+              <tr>
+                <td>Min. Spec.</td>
+                {points.map((p) => (
+                  <td key={p.id}>{p.min_spec ?? "—"}</td>
+                ))}
+              </tr>
+              {samples.map((s) => (
+                <tr key={s}>
+                  <td>{s.toFixed(1)}</td>
+                  {points.map((p) => {
+                    const cell = grid[`${p.id}:${s}`];
+                    const within = cell?.within_tolerance;
+                    return (
+                      <td key={p.id} className={within === 0 ? "sheet-cell-fail" : ""}>
+                        {cell?.measured_value ?? "—"}
+                      </td>
+                    );
+                  })}
                 </tr>
-              );
-            })}
-          </tbody>
-        </table>
+              ))}
+            </tbody>
+          </table>
+        </div>
 
         {inspection.notes && (
           <p>
