@@ -197,6 +197,48 @@ button.secondary-btn {
   border: 1px solid var(--border);
 }
 
+.context-menu {
+  position: fixed;
+  z-index: 1000;
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  background: white;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+  min-width: 140px;
+}
+
+.context-menu li {
+  padding: 8px 14px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.context-menu li:hover {
+  background: var(--bg);
+}
+
+.context-menu-danger {
+  color: var(--fail);
+}
+
+.row-editing {
+  background: #fff8e1;
+}
+
+.row-actions {
+  display: flex;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.row-actions button {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
 button.approve {
   background: var(--ok);
 }
@@ -266,6 +308,43 @@ button.reject {
   margin: 12px 0;
 }
 
+.drawing-preview-pdf {
+  width: 100%;
+  height: 600px;
+}
+
+.version-pills {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 12px 0;
+}
+
+.version-pill {
+  background: white;
+  color: var(--primary);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.version-pill:hover {
+  border-color: var(--accent);
+}
+
+.unit-input {
+  width: 130px;
+}
+
+.version-pill-active {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
@@ -290,6 +369,28 @@ th {
 
 .capture-table input {
   width: 100px;
+}
+
+.capture-table-transposed th,
+.capture-table-transposed td {
+  text-align: center;
+  min-width: 64px;
+}
+
+.capture-table-transposed th:first-child,
+.capture-table-transposed td:first-child {
+  text-align: left;
+  min-width: 90px;
+  white-space: nowrap;
+}
+
+.capture-table-transposed .spec-row td {
+  font-weight: 600;
+  background: var(--bg);
+}
+
+.capture-table-transposed input {
+  width: 60px;
 }
 
 .input-out-of-tolerance {
@@ -317,6 +418,19 @@ th {
 
 .table-scroll {
   overflow-x: auto;
+}
+
+.locked-value {
+  display: inline-block;
+  padding: 8px 0;
+  color: #1a1a1a;
+}
+
+.locked-value-fail {
+  display: inline-block;
+  padding: 8px 0;
+  color: var(--fail);
+  font-weight: 700;
 }
 
 .sign-panel {

@@ -76,10 +76,10 @@ export default function InspectionSheet() {
               </tr>
               <tr>
                 <td>
-                  <strong>Sampling Plan n=</strong> {inspection.sampling_plan_n ?? "—"}
+                  <strong>N:</strong> {inspection.sampling_plan_n ?? "—"}
                 </td>
                 <td>
-                  <strong>c=</strong> {inspection.sampling_plan_c ?? "—"}
+                  <strong>C:</strong> {inspection.sampling_plan_c ?? "—"}
                 </td>
                 <td>
                   <strong>Lot Disposition:</strong> {inspection.lot_disposition || "—"}
@@ -115,24 +115,24 @@ export default function InspectionSheet() {
               <tr>
                 <td>Max. Spec.</td>
                 {points.map((p) => (
-                  <td key={p.id}>{p.max_spec ?? "—"}</td>
+                  <td key={p.id}>{p.max_spec != null ? `${p.max_spec}${p.unit || ""}` : "—"}</td>
                 ))}
               </tr>
               <tr>
                 <td>MEAN</td>
                 {points.map((p) => (
-                  <td key={p.id}>{p.mean_value ?? "—"}</td>
+                  <td key={p.id}>{p.mean_value != null ? `${p.mean_value}${p.unit || ""}` : "—"}</td>
                 ))}
               </tr>
               <tr>
                 <td>Min. Spec.</td>
                 {points.map((p) => (
-                  <td key={p.id}>{p.min_spec ?? "—"}</td>
+                  <td key={p.id}>{p.min_spec != null ? `${p.min_spec}${p.unit || ""}` : "—"}</td>
                 ))}
               </tr>
               {samples.map((s) => (
                 <tr key={s}>
-                  <td>{s.toFixed(1)}</td>
+                  <td>{Number.isInteger(s) ? s : s.toFixed(1)}</td>
                   {points.map((p) => {
                     const cell = grid[`${p.id}:${s}`];
                     const within = cell?.within_tolerance;

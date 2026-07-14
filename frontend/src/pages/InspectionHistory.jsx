@@ -66,7 +66,7 @@ export default function InspectionHistory() {
 
       <form className="filter-form" onSubmit={handleSubmit}>
         <select value={clientId} onChange={(e) => setClientId(e.target.value)}>
-          <option value="">All clients</option>
+          <option value="">All customers</option>
           {clients.map((c) => (
             <option key={c.id} value={c.id}>
               {c.name}
@@ -107,7 +107,7 @@ export default function InspectionHistory() {
         <table>
           <thead>
             <tr>
-              <th>Client</th>
+              <th>Customer</th>
               <th>Part</th>
               <th>Type</th>
               <th>Date</th>

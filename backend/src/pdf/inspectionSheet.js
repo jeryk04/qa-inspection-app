@@ -5,28 +5,40 @@ const fs = require("fs");
 const LOGO_PATH = path.join(__dirname, "..", "assets", "logo.png");
 const PAGE_MARGIN = 30;
 
-// Order matches the checkbox row on the paper Data Sheet.
-const TYPE_ORDER = ["quote", "in_process", "setup", "incoming", "final", "other"];
-const TYPE_LABELS = {
-  quote: "Quote",
-  in_process: "In Proc",
-  setup: "1st Article",
-  incoming: "Incoming",
-  final: "Final",
-  other: "Other",
+// Matches the printed header on the company's paper Data Sheet.
+const COMPANY = {
+  name: "G&J Steel & Tubing, Inc",
+  addressLine1: "406 Roycefield Road   Hillsborough, NJ 08844",
+  addressLine2: "908-526-4445    Fax 908-526-9487",
 };
+
+// Two rows of three, matching the paper form's checkbox layout.
+const TYPE_ROWS = [
+  [
+    ["quote", "Quote"],
+    ["in_process", "In Proc"],
+    ["setup", "1st Article"],
+  ],
+  [
+    ["incoming", "Incoming"],
+    ["final", "Final"],
+    ["other", "Other"],
+  ],
+];
 
 function generateInspectionPdf(res, inspection) {
   const doc = new PDFDocument({ size: "letter", layout: "landscape", margin: PAGE_MARGIN });
   doc.pipe(res);
 
-  const points = uniquePoints(inspection.measurements);
+  const points = inspection.points && inspection.points.length > 0
+    ? inspection.points
+    : uniquePoints(inspection.measurements);
   const samples = uniqueSamples(inspection.measurements);
   const grid = buildGrid(inspection.measurements);
 
   const pageWidth = doc.page.width - PAGE_MARGIN * 2;
   const labelColWidth = 70;
-  const minColWidth = 55;
+  const minColWidth = 42;
   const maxPointsPerPage = Math.max(1, Math.floor((pageWidth - labelColWidth) / minColWidth));
 
   const pages = chunk(points, maxPointsPerPage);
@@ -51,40 +63,45 @@ function generateInspectionPdf(res, inspection) {
 
 function drawHeader(doc, inspection, pageNum, totalPages, pageWidth) {
   const startX = doc.page.margins.left;
-  let y = doc.page.margins.top;
+  const topY = doc.page.margins.top;
 
-  const logoW = 70;
-  const logoH = 40;
+  const logoW = 38;
+  const logoH = 38;
+  const companyX = startX + logoW + 8;
+  const companyWidth = 220;
+  const typeX = companyX + companyWidth + 6;
+  const typeColWidth = 92;
+  const typeBlockWidth = typeColWidth * 3;
+  const sheetX = typeX + typeBlockWidth + 8;
+  const sheetWidth = pageWidth - (sheetX - startX);
+
+  let y = topY;
+
   if (fs.existsSync(LOGO_PATH)) {
     doc.image(LOGO_PATH, startX, y, { fit: [logoW, logoH] });
   }
+
+  doc.font("Helvetica-Bold").fontSize(13).text(COMPANY.name, companyX, y, { width: companyWidth });
   doc
     .font("Helvetica-Bold")
-    .fontSize(16)
-    .text("DATA SHEET", startX + logoW + 10, y + 12, { width: pageWidth - logoW - 170, align: "center" });
-  doc
-    .font("Helvetica")
-    .fontSize(9)
-    .text(`Sheet ${pageNum} of ${totalPages}`, startX + pageWidth - 150, y + 16, {
-      width: 150,
-      align: "right",
-    });
+    .fontSize(15)
+    .text("DATA SHEET", typeX, y + 1, { width: typeBlockWidth + sheetWidth, height: 14, align: "center" });
 
-  y += logoH + 8;
+  y += 15;
+  doc.font("Helvetica").fontSize(7).text(COMPANY.addressLine1, companyX, y, { width: companyWidth });
+  drawTypeRow(doc, typeX, y, typeColWidth, TYPE_ROWS[0], inspection.type);
+  doc.font("Helvetica").fontSize(8).text("Sheet", sheetX, y);
+  doc.font("Helvetica-Bold").fontSize(9).text(String(pageNum), sheetX + 34, y - 1);
 
-  const boxSize = 10;
-  const typeColWidth = pageWidth / TYPE_ORDER.length;
-  TYPE_ORDER.forEach((t, i) => {
-    const cx = startX + i * typeColWidth;
-    doc.rect(cx, y, boxSize, boxSize).stroke();
-    if (inspection.type === t) {
-      doc.font("Helvetica-Bold").fontSize(9).text("X", cx + 1.5, y);
-    }
-    doc.font("Helvetica").fontSize(8).text(TYPE_LABELS[t], cx + boxSize + 4, y + 1);
-  });
-  y += boxSize + 10;
+  y += 13;
+  doc.font("Helvetica").fontSize(7).text(COMPANY.addressLine2, companyX, y, { width: companyWidth });
+  drawTypeRow(doc, typeX, y, typeColWidth, TYPE_ROWS[1], inspection.type);
+  doc.font("Helvetica").fontSize(8).text("of", sheetX, y);
+  doc.font("Helvetica-Bold").fontSize(9).text(String(totalPages), sheetX + 34, y - 1);
 
-  const rowH = 24;
+  y += 20;
+
+  const rowH = 22;
 
   drawFieldRow(doc, startX, y, pageWidth, rowH, [
     ["Part #", inspection.part_number],
@@ -109,16 +126,28 @@ function drawHeader(doc, inspection, pageNum, totalPages, pageWidth) {
   const signedDate = inspection.signature ? inspection.signature.signed_at : inspection.date;
 
   drawFieldRow(doc, startX, y, pageWidth, rowH, [
-    ["Sampling Plan n=", inspection.sampling_plan_n],
-    ["c=", inspection.sampling_plan_c],
+    ["N:", inspection.sampling_plan_n],
+    ["C:", inspection.sampling_plan_c],
     ["Lot Disposition", inspection.lot_disposition],
     ["By", signedBy],
     ["Date", signedDate],
   ]);
-  y += rowH + 8;
+  y += rowH + 6;
 
   doc.x = startX;
   doc.y = y;
+}
+
+function drawTypeRow(doc, x, y, colWidth, entries, currentType) {
+  entries.forEach(([typeKey, label], i) => {
+    const cx = x + i * colWidth;
+    const boxSize = 8;
+    doc.rect(cx, y + 1, boxSize, boxSize).stroke();
+    if (currentType === typeKey) {
+      doc.font("Helvetica-Bold").fontSize(8).text("X", cx + 1, y);
+    }
+    doc.font("Helvetica").fontSize(8).text(label, cx + boxSize + 4, y);
+  });
 }
 
 function drawFieldRow(doc, x, y, totalWidth, rowH, fields) {
@@ -135,7 +164,7 @@ function drawFieldBox(doc, x, y, w, h, label, value) {
     .font("Helvetica")
     .fontSize(9)
     .fillColor("#000")
-    .text(value, x + 3, y + 11, { width: w - 6, height: h - 13 });
+    .text(value, x + 3, y + 10, { width: w - 6, height: h - 12 });
 }
 
 function drawGrid(doc, pagePoints, samples, grid, pageWidth, labelColWidth) {
@@ -159,13 +188,15 @@ function drawGrid(doc, pagePoints, samples, grid, pageWidth, labelColWidth) {
     drawCell(doc, startX, y, labelColWidth, rowH, label, { bold: true });
     pagePoints.forEach((p, i) => {
       const v = getter(p);
-      drawCell(doc, startX + labelColWidth + i * colW, y, colW, rowH, v != null ? String(v) : "");
+      const text = v != null ? `${v}${p.unit || ""}` : "";
+      drawCell(doc, startX + labelColWidth + i * colW, y, colW, rowH, text);
     });
     y += rowH;
   });
 
   samples.forEach((s) => {
-    drawCell(doc, startX, y, labelColWidth, rowH, s.toFixed(1), { bold: true });
+    const sampleLabel = Number.isInteger(s) ? String(s) : s.toFixed(1);
+    drawCell(doc, startX, y, labelColWidth, rowH, sampleLabel, { bold: true });
     pagePoints.forEach((p, i) => {
       const cell = grid[`${p.id}:${s}`];
       const text = cell && cell.measured_value != null ? String(cell.measured_value) : "";

@@ -5,18 +5,17 @@ import { useAuth } from "../context/AuthContext";
 
 const BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:3001/api";
 
+// Only the header fields Final Inspection actually uses. Heat/Supplier/PO#/
+// Customer PO#/Operation are on the paper form for other inspection types
+// (Incoming, etc.) — the columns still exist in the data model for when
+// those phases are built, this capture form just doesn't ask for them.
 const HEADER_FIELDS = [
   ["customer", "Customer"],
-  ["heat", "Heat"],
   ["quantity", "Quantity"],
-  ["supplier", "Supplier"],
-  ["po_number", "PO#"],
-  ["customer_po_number", "Customer PO#"],
-  ["operation", "Operation"],
   ["job_number", "Job#"],
   ["inspector", "Inspector"],
-  ["sampling_plan_n", "Sampling Plan n="],
-  ["sampling_plan_c", "c="],
+  ["sampling_plan_n", "N:"],
+  ["sampling_plan_c", "C:"],
   ["lot_disposition", "Lot Disposition"],
 ];
 
@@ -164,6 +163,7 @@ export default function InspectionCapture() {
     );
   }
 
+  const isLocked = inspection.status !== "in_progress";
   const measurementsByCell = Object.fromEntries(
     inspection.measurements.map((m) => [cellKey(m.balloon_point_id, m.sample_number), m])
   );
@@ -171,65 +171,93 @@ export default function InspectionCapture() {
   return (
     <div className="page">
       <Link to={`/parts/${inspection.part_id}/inspections`} className="back-link">
-        ← Inspections
+        ← Data Sheets
       </Link>
-      <h1>Inspection Sheet — Final Inspection</h1>
+      <h1>Data Sheet — {inspection.part_number}</h1>
       <p className="muted">
         Inspection #{inspection.id} · Status: <span className={`status status-${inspection.status}`}>{inspection.status}</span>
       </p>
 
       {error && <p className="error">{error}</p>}
 
+      {isLocked && (
+        <p className="sign-panel">
+          This Data Sheet has been signed and is now locked — it can no longer be edited. Use "Export PDF" or
+          "View / Print" below to see the final record.
+        </p>
+      )}
+
       <h2>Header</h2>
       <div className="header-grid">
         {HEADER_FIELDS.map(([field, label]) => (
           <label key={field} className="header-field">
             <span className="muted">{label}</span>
-            <input value={header[field] ?? ""} onChange={(e) => handleHeaderChange(field, e.target.value)} />
+            {isLocked ? (
+              <span className="locked-value">{header[field] || "—"}</span>
+            ) : (
+              <input value={header[field] ?? ""} onChange={(e) => handleHeaderChange(field, e.target.value)} />
+            )}
           </label>
         ))}
       </div>
-      <div className="actions-row">
-        <button onClick={handleSaveHeader} disabled={savingHeader} className="secondary-btn">
-          Save header
-        </button>
-      </div>
+      {!isLocked && (
+        <div className="actions-row">
+          <button onClick={handleSaveHeader} disabled={savingHeader} className="secondary-btn">
+            Save header
+          </button>
+        </div>
+      )}
 
       <h2>Measurements</h2>
       <div className="table-scroll">
-        <table className="capture-table">
+        <table className="capture-table capture-table-transposed">
           <thead>
             <tr>
               <th>Find #</th>
-              <th>Description</th>
-              <th>Max Spec</th>
-              <th>Mean</th>
-              <th>Min Spec</th>
-              {samples.map((s) => (
-                <th key={s}>Sample {s}</th>
+              {drawing.points.map((p) => (
+                <th key={p.id}>{p.balloon_number}</th>
               ))}
             </tr>
           </thead>
           <tbody>
-            {drawing.points.map((p) => (
-              <tr key={p.id}>
-                <td>{p.balloon_number}</td>
-                <td>{p.description}</td>
-                <td>{p.max_spec ?? "—"}</td>
-                <td>{p.mean_value ?? "—"}</td>
-                <td>{p.min_spec ?? "—"}</td>
-                {samples.map((s) => {
+            <tr className="spec-row">
+              <td>Max. Spec.</td>
+              {drawing.points.map((p) => (
+                <td key={p.id}>{p.max_spec != null ? `${p.max_spec}${p.unit || ""}` : "—"}</td>
+              ))}
+            </tr>
+            <tr className="spec-row">
+              <td>MEAN</td>
+              {drawing.points.map((p) => (
+                <td key={p.id}>{p.mean_value != null ? `${p.mean_value}${p.unit || ""}` : "—"}</td>
+              ))}
+            </tr>
+            <tr className="spec-row">
+              <td>Min. Spec.</td>
+              {drawing.points.map((p) => (
+                <td key={p.id}>{p.min_spec != null ? `${p.min_spec}${p.unit || ""}` : "—"}</td>
+              ))}
+            </tr>
+            {samples.map((s) => (
+              <tr key={s}>
+                <td>{Number.isInteger(s) ? s : s.toFixed(1)}</td>
+                {drawing.points.map((p) => {
                   const measurement = measurementsByCell[cellKey(p.id, s)];
                   const within = measurement?.within_tolerance;
+                  const value = values[cellKey(p.id, s)] ?? "";
                   return (
-                    <td key={s}>
-                      <input
-                        type="number"
-                        step="any"
-                        value={values[cellKey(p.id, s)] ?? ""}
-                        onChange={(e) => handleChange(p.id, s, e.target.value)}
-                        className={within === 0 ? "input-out-of-tolerance" : ""}
-                      />
+                    <td key={p.id}>
+                      {isLocked ? (
+                        <span className={within === 0 ? "locked-value-fail" : "locked-value"}>{value || "—"}</span>
+                      ) : (
+                        <input
+                          type="number"
+                          step="any"
+                          value={value}
+                          onChange={(e) => handleChange(p.id, s, e.target.value)}
+                          className={within === 0 ? "input-out-of-tolerance" : ""}
+                        />
+                      )}
                     </td>
                   );
                 })}
@@ -240,18 +268,22 @@ export default function InspectionCapture() {
       </div>
 
       <div className="actions-row">
-        <button onClick={handleAddSample} className="secondary-btn">
-          + Add sample
-        </button>
-        <button onClick={handleSave} disabled={saving}>
-          Save measurements
-        </button>
-        <button onClick={() => startSigning("approved")} className="approve">
-          Approve
-        </button>
-        <button onClick={() => startSigning("rejected")} className="reject">
-          Reject
-        </button>
+        {!isLocked && (
+          <>
+            <button onClick={handleAddSample} className="secondary-btn">
+              + Add sample
+            </button>
+            <button onClick={handleSave} disabled={saving}>
+              Save measurements
+            </button>
+            <button onClick={() => startSigning("approved")} className="approve">
+              Approve
+            </button>
+            <button onClick={() => startSigning("rejected")} className="reject">
+              Reject
+            </button>
+          </>
+        )}
         <Link to={`/inspections/${inspectionId}/sheet`} className="secondary-link">
           View / Print Inspection Sheet
         </Link>

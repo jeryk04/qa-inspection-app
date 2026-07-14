@@ -21,6 +21,19 @@ const HEADER_FIELDS = [
   "notes",
 ];
 
+// Supports one-sided specs (max-only = "must not exceed", min-only = "must be at
+// least") as well as two-sided tolerance bands. Returns null when neither bound
+// is set, since there's nothing to check the measurement against.
+function computeWithinTolerance(point, measuredValue) {
+  if (!point || measuredValue == null) return null;
+  const hasMax = point.max_spec != null;
+  const hasMin = point.min_spec != null;
+  if (!hasMax && !hasMin) return null;
+  if (hasMax && measuredValue > point.max_spec) return 0;
+  if (hasMin && measuredValue < point.min_spec) return 0;
+  return 1;
+}
+
 // GET /api/inspections?part_id=1&type=final&client_id=1&status=approved&date_from=2026-01-01&date_to=2026-12-31
 router.get("/", (req, res) => {
   const { part_id, type, client_id, status, date_from, date_to } = req.query;
@@ -87,7 +100,19 @@ function getInspectionDetail(id) {
     )
     .all(id);
 
-  return { ...inspection, measurements };
+  // All Find# columns defined on the drawing — independent of whether they
+  // have a recorded measurement yet, so the sheet/PDF grid shows every
+  // column from the start instead of only ones that already have data.
+  const points = inspection.drawing_id
+    ? db
+        .prepare(
+          `SELECT id, balloon_number, description, max_spec, min_spec, mean_value, unit
+           FROM balloon_points WHERE drawing_id = ? ORDER BY balloon_number`
+        )
+        .all(inspection.drawing_id)
+    : [];
+
+  return { ...inspection, measurements, points };
 }
 
 // GET /api/inspections/:id  (includes measurements + specs for each balloon)
@@ -151,6 +176,9 @@ router.post("/", (req, res) => {
 router.put("/:id", (req, res) => {
   const existing = db.prepare("SELECT * FROM inspections WHERE id = ?").get(req.params.id);
   if (!existing) return res.status(404).json({ error: "Inspection not found" });
+  if (existing.status !== "in_progress") {
+    return res.status(409).json({ error: "This Data Sheet has been signed and can no longer be edited." });
+  }
 
   const changes = {};
   HEADER_FIELDS.forEach((f) => {
@@ -177,6 +205,12 @@ router.put("/:id", (req, res) => {
 // PUT /api/inspections/:id/measurements  (saves/updates measurements in batch)
 // body: { measurements: [{ balloon_point_id, sample_number, measured_value }, ...] }
 router.put("/:id/measurements", (req, res) => {
+  const inspection = db.prepare("SELECT status FROM inspections WHERE id = ?").get(req.params.id);
+  if (!inspection) return res.status(404).json({ error: "Inspection not found" });
+  if (inspection.status !== "in_progress") {
+    return res.status(409).json({ error: "This Data Sheet has been signed and can no longer be edited." });
+  }
+
   const { measurements } = req.body;
   if (!Array.isArray(measurements)) return res.status(400).json({ error: "measurements must be an array" });
 
@@ -199,12 +233,7 @@ router.put("/:id/measurements", (req, res) => {
     for (const item of items) {
       const point = getPoint.get(item.balloon_point_id);
       const sampleNumber = item.sample_number ?? 1;
-      let withinTolerance = null;
-
-      if (point && point.min_spec != null && point.max_spec != null && item.measured_value != null) {
-        withinTolerance =
-          item.measured_value >= point.min_spec && item.measured_value <= point.max_spec ? 1 : 0;
-      }
+      const withinTolerance = computeWithinTolerance(point, item.measured_value);
 
       const existing = getExisting.get(req.params.id, item.balloon_point_id, sampleNumber);
       if (!existing || existing.measured_value !== item.measured_value) {
@@ -250,6 +279,13 @@ router.put("/:id/status", (req, res) => {
   if (!["approved", "rejected"].includes(status)) {
     return res.status(400).json({ error: "status must be 'approved' or 'rejected'" });
   }
+
+  const existing = db.prepare("SELECT status FROM inspections WHERE id = ?").get(req.params.id);
+  if (!existing) return res.status(404).json({ error: "Inspection not found" });
+  if (existing.status !== "in_progress") {
+    return res.status(409).json({ error: "This Data Sheet has already been signed." });
+  }
+
   if (!signer_name || signer_name.trim().toLowerCase() !== req.user.full_name.trim().toLowerCase()) {
     return res.status(400).json({ error: "signer_name must match your logged-in full name to sign" });
   }

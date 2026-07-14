@@ -25,17 +25,24 @@ export const api = {
   // Clients
   getClients: () => request("/clients"),
   createClient: (data) => request("/clients", { method: "POST", body: JSON.stringify(data) }),
+  updateClient: (id, data) => request(`/clients/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+  deleteClient: (id) => request(`/clients/${id}`, { method: "DELETE" }),
 
   // Parts
   getParts: (clientId) => request(`/parts?client_id=${clientId}`),
+  getPart: (id) => request(`/parts/${id}`),
   createPart: (data) => request("/parts", { method: "POST", body: JSON.stringify(data) }),
 
   // Balloon Drawings
   getDrawings: (partId) => request(`/drawings?part_id=${partId}`),
   getDrawing: (id) => request(`/drawings/${id}`),
   uploadDrawing: (formData) => request("/drawings", { method: "POST", body: formData }),
+  deleteDrawing: (id) => request(`/drawings/${id}`, { method: "DELETE" }),
   addPoint: (drawingId, data) =>
     request(`/drawings/${drawingId}/points`, { method: "POST", body: JSON.stringify(data) }),
+  updatePoint: (pointId, data) =>
+    request(`/drawings/points/${pointId}`, { method: "PUT", body: JSON.stringify(data) }),
+  deletePoint: (pointId) => request(`/drawings/points/${pointId}`, { method: "DELETE" }),
 
   // Inspections
   getInspections: (params = {}) => {

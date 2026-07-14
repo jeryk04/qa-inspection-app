@@ -13,7 +13,6 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS clients (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   name          TEXT NOT NULL,
-  contact       TEXT,
   created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -43,7 +42,7 @@ CREATE TABLE IF NOT EXISTS balloon_points (
   max_spec          REAL,
   min_spec          REAL,
   mean_value        REAL,
-  unit              TEXT DEFAULT 'mm',
+  unit              TEXT,
   UNIQUE(drawing_id, balloon_number)
 );
 

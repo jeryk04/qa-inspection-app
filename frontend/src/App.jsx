@@ -39,7 +39,7 @@ function AppShell() {
         </Link>
         {user && (
           <nav className="main-nav">
-            <Link to="/clients">Clients</Link>
+            <Link to="/clients">Customers</Link>
             <Link to="/history">History</Link>
             <span className="nav-user">{user.full_name}</span>
             <button className="secondary-btn" onClick={() => logout()}>

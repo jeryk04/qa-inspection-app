@@ -72,7 +72,7 @@ single value per point.
 
 | Entity | Key Fields |
 |---|---|
-| Clients | id, name, contact info |
+| Clients | id, name |
 | Parts | id, client_id, part number, description |
 | Balloon Drawings | id, part_id, image, list of numbered Find # points |
 | Balloon Points | id, drawing_id, balloon_number (Find #), description, max_spec, min_spec, mean_value, unit |

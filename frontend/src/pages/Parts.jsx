@@ -33,7 +33,7 @@ export default function Parts() {
   return (
     <div className="page">
       <Link to="/clients" className="back-link">
-        ← Clients
+        ← Customers
       </Link>
       <h1>Parts</h1>
 
@@ -61,7 +61,7 @@ export default function Parts() {
             </Link>
           </li>
         ))}
-        {parts.length === 0 && <p className="muted">This client has no parts yet.</p>}
+        {parts.length === 0 && <p className="muted">This customer has no parts yet.</p>}
       </ul>
     </div>
   );
