@@ -14,6 +14,12 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage });
 
+function clampDecimalPlaces(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 3;
+  return Math.min(6, Math.max(0, Math.round(n)));
+}
+
 // GET /api/drawings?part_id=1
 router.get("/", (req, res) => {
   const { part_id } = req.query;
@@ -29,18 +35,21 @@ router.get("/:id", (req, res) => {
   if (!drawing) return res.status(404).json({ error: "Drawing not found" });
 
   const points = db
-    .prepare("SELECT * FROM balloon_points WHERE drawing_id = ? ORDER BY balloon_number")
+    .prepare("SELECT * FROM balloon_points WHERE drawing_id = ? ORDER BY sort_order")
     .all(req.params.id);
 
   res.json({ ...drawing, points });
 });
 
-// POST /api/drawings  (multipart/form-data: image + part_id; image/PDF both accepted)
-// Auto-increments version to (highest existing version for this part) + 1, unless explicitly provided.
+// POST /api/drawings  (multipart/form-data: part_id required, image optional;
+// image/PDF both accepted). A drawing revision can exist without an image —
+// e.g. so its Find# columns/specs can be set up before a drawing is ready to
+// upload. Auto-increments version to (highest existing version for this
+// part) + 1, unless explicitly provided.
 router.post("/", upload.single("image"), (req, res) => {
   const { part_id, version } = req.body;
-  if (!part_id || !req.file) {
-    return res.status(400).json({ error: "part_id and image are required" });
+  if (!part_id) {
+    return res.status(400).json({ error: "part_id is required" });
   }
 
   let nextVersion = version;
@@ -51,9 +60,10 @@ router.post("/", upload.single("image"), (req, res) => {
     nextVersion = (row.maxVersion || 0) + 1;
   }
 
+  const imagePath = req.file ? `/uploads/${req.file.filename}` : null;
   const result = db
     .prepare("INSERT INTO balloon_drawings (part_id, image_path, version) VALUES (?, ?, ?)")
-    .run(part_id, `/uploads/${req.file.filename}`, nextVersion);
+    .run(part_id, imagePath, nextVersion);
 
   const drawing = db.prepare("SELECT * FROM balloon_drawings WHERE id = ?").get(result.lastInsertRowid);
   res.status(201).json(drawing);
@@ -77,49 +87,54 @@ router.delete("/:id", (req, res) => {
   }
 });
 
-// POST /api/drawings/:id/points  (adds a numbered point with its specification)
+// POST /api/drawings/:id/points  (adds a point with its specification, appended
+// to the end of the column order)
 router.post("/:id/points", (req, res) => {
-  const { balloon_number, description, max_spec, min_spec, mean_value, unit } = req.body;
+  const { balloon_number, max_spec, min_spec, mean_value, decimal_places } = req.body;
   if (!balloon_number) return res.status(400).json({ error: "balloon_number is required" });
+
+  const { maxOrder } = db
+    .prepare("SELECT MAX(sort_order) AS maxOrder FROM balloon_points WHERE drawing_id = ?")
+    .get(req.params.id);
+  const nextOrder = maxOrder == null ? 0 : maxOrder + 1;
 
   const result = db
     .prepare(
       `INSERT INTO balloon_points
-       (drawing_id, balloon_number, description, max_spec, min_spec, mean_value, unit)
+       (drawing_id, balloon_number, max_spec, min_spec, mean_value, sort_order, decimal_places)
        VALUES (?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       req.params.id,
       balloon_number,
-      description || null,
       max_spec ?? null,
       min_spec ?? null,
       mean_value ?? null,
-      unit || null
+      nextOrder,
+      clampDecimalPlaces(decimal_places)
     );
 
   const point = db.prepare("SELECT * FROM balloon_points WHERE id = ?").get(result.lastInsertRowid);
   res.status(201).json(point);
 });
 
-// PUT /api/drawings/points/:id  (edit an existing point's Find#, spec, or unit)
+// PUT /api/drawings/points/:id  (edit an existing point's Find#, spec, or decimal places)
 router.put("/points/:id", (req, res) => {
-  const { balloon_number, description, max_spec, min_spec, mean_value, unit } = req.body;
+  const { balloon_number, max_spec, min_spec, mean_value, decimal_places } = req.body;
   if (!balloon_number) return res.status(400).json({ error: "balloon_number is required" });
 
   const result = db
     .prepare(
       `UPDATE balloon_points
-       SET balloon_number = ?, description = ?, max_spec = ?, min_spec = ?, mean_value = ?, unit = ?
+       SET balloon_number = ?, max_spec = ?, min_spec = ?, mean_value = ?, decimal_places = ?
        WHERE id = ?`
     )
     .run(
       balloon_number,
-      description || null,
       max_spec ?? null,
       min_spec ?? null,
       mean_value ?? null,
-      unit || null,
+      clampDecimalPlaces(decimal_places),
       req.params.id
     );
 

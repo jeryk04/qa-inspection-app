@@ -32,6 +32,8 @@ export const api = {
   getParts: (clientId) => request(`/parts?client_id=${clientId}`),
   getPart: (id) => request(`/parts/${id}`),
   createPart: (data) => request("/parts", { method: "POST", body: JSON.stringify(data) }),
+  updatePart: (id, data) => request(`/parts/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+  deletePart: (id) => request(`/parts/${id}`, { method: "DELETE" }),
 
   // Balloon Drawings
   getDrawings: (partId) => request(`/drawings?part_id=${partId}`),
@@ -52,11 +54,14 @@ export const api = {
   getInspection: (id) => request(`/inspections/${id}`),
   createInspection: (data) => request("/inspections", { method: "POST", body: JSON.stringify(data) }),
   updateInspection: (id, data) => request(`/inspections/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+  deleteInspection: (id) => request(`/inspections/${id}`, { method: "DELETE" }),
   saveMeasurements: (inspectionId, measurements) =>
     request(`/inspections/${inspectionId}/measurements`, {
       method: "PUT",
       body: JSON.stringify({ measurements }),
     }),
+  deleteSample: (inspectionId, sampleNumber) =>
+    request(`/inspections/${inspectionId}/measurements/${sampleNumber}`, { method: "DELETE" }),
   setStatus: (inspectionId, status, signerName) =>
     request(`/inspections/${inspectionId}/status`, {
       method: "PUT",

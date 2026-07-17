@@ -25,24 +25,33 @@ CREATE TABLE IF NOT EXISTS parts (
   UNIQUE(client_id, part_number)
 );
 
+-- image_path is nullable: a drawing revision can exist purely to hold Find#
+-- columns/specs before any drawing image has been uploaded.
 CREATE TABLE IF NOT EXISTS balloon_drawings (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   part_id       INTEGER NOT NULL REFERENCES parts(id) ON DELETE CASCADE,
-  image_path    TEXT NOT NULL,
+  image_path    TEXT,
   version       INTEGER NOT NULL DEFAULT 1,
   created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- Each numbered "balloon" point (Find #) within a drawing, with its specification.
+-- Each "balloon" point (Find #) within a drawing, with its specification.
+-- balloon_number is free text, not a strict number — most are "1", "2", etc.
+-- but some are named dimensions like "Length" or "Angle". sort_order is the
+-- column display order (set to the next available slot when a point is
+-- created) — Find# columns are always displayed/sorted by this, never by
+-- parsing or alphabetizing balloon_number. decimal_places controls how many
+-- decimals this column's spec/measurement values display with (e.g. 0 for a
+-- whole-number dimension) — display-only, doesn't affect the stored value.
 CREATE TABLE IF NOT EXISTS balloon_points (
   id                INTEGER PRIMARY KEY AUTOINCREMENT,
   drawing_id        INTEGER NOT NULL REFERENCES balloon_drawings(id) ON DELETE CASCADE,
-  balloon_number    INTEGER NOT NULL,
-  description       TEXT,
+  balloon_number    TEXT NOT NULL,
   max_spec          REAL,
   min_spec          REAL,
   mean_value        REAL,
-  unit              TEXT,
+  sort_order        INTEGER NOT NULL DEFAULT 0,
+  decimal_places    INTEGER NOT NULL DEFAULT 3,
   UNIQUE(drawing_id, balloon_number)
 );
 

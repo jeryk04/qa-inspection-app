@@ -1,6 +1,67 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api/client";
+import logo from "../assets/logo.png";
+
+// Matches the schema's `type` enum — Phase 1 only ever creates 'final'.
+const TYPE_LABELS = [
+  ["quote", "Quote"],
+  ["incoming", "Incoming"],
+  ["setup", "1st Article"],
+  ["in_process", "In Process"],
+  ["final", "Final"],
+  ["other", "Other"],
+];
+
+const COMPANY = {
+  name: "G & J STEEL & TUBING, INC.",
+  tagline: "Quality Parts, On Time",
+  address: "301 Roycefield Rd., Hillsborough, NJ 08844",
+  tel: "1-800-322-8823",
+  fax: "860-434-1371",
+};
+
+function formatDateTime(value) {
+  if (!value) return "—";
+  const d = new Date(value.replace(" ", "T") + "Z");
+  if (Number.isNaN(d.getTime())) return value;
+  return d.toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function CheckIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+      <path d="M4 10.5l4 4 8-9" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function XIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+      <path d="M5 5l10 10M15 5L5 15" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function WarningIcon() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 20 20" fill="none" aria-hidden="true" className="warning-icon">
+      <path
+        d="M10 2.5l8.5 14.7a1 1 0 01-.87 1.5H2.37a1 1 0 01-.87-1.5L10 2.5z"
+        fill="currentColor"
+      />
+      <path d="M10 8v4" stroke="white" strokeWidth="1.4" strokeLinecap="round" />
+      <circle cx="10" cy="14.3" r="0.9" fill="white" />
+    </svg>
+  );
+}
 
 export default function InspectionSheet() {
   const { inspectionId } = useParams();
@@ -28,6 +89,7 @@ export default function InspectionSheet() {
   const grid = Object.fromEntries(
     inspection.measurements.map((m) => [`${m.balloon_point_id}:${m.sample_number}`, m])
   );
+  const signature = inspection.signature;
 
   return (
     <div className="page sheet-page">
@@ -39,67 +101,78 @@ export default function InspectionSheet() {
       </div>
 
       <div className="sheet">
-        <header className="sheet-header">
-          <h1>Final Inspection Data Sheet</h1>
-          <table className="sheet-meta">
-            <tbody>
-              <tr>
-                <td>
-                  <strong>Part #:</strong> {inspection.part_number}
-                </td>
-                <td>
-                  <strong>Heat:</strong> {inspection.heat || "—"}
-                </td>
-                <td>
-                  <strong>Quantity:</strong> {inspection.quantity ?? "—"}
-                </td>
-                <td>
-                  <strong>Supplier:</strong> {inspection.supplier || "—"}
-                </td>
-                <td>
-                  <strong>PO#:</strong> {inspection.po_number || "—"}
-                </td>
-              </tr>
-              <tr>
-                <td>
-                  <strong>Operation:</strong> {inspection.operation || "—"}
-                </td>
-                <td>
-                  <strong>Job#:</strong> {inspection.job_number || "—"}
-                </td>
-                <td>
-                  <strong>Customer:</strong> {inspection.customer || inspection.client_name}
-                </td>
-                <td colSpan={2}>
-                  <strong>Customer PO#:</strong> {inspection.customer_po_number || "—"}
-                </td>
-              </tr>
-              <tr>
-                <td>
-                  <strong>N:</strong> {inspection.sampling_plan_n ?? "—"}
-                </td>
-                <td>
-                  <strong>C:</strong> {inspection.sampling_plan_c ?? "—"}
-                </td>
-                <td>
-                  <strong>Lot Disposition:</strong> {inspection.lot_disposition || "—"}
-                </td>
-                <td>
-                  <strong>By:</strong> {inspection.inspector || "—"}
-                </td>
-                <td>
-                  <strong>Date:</strong> {inspection.date}
-                </td>
-              </tr>
-              <tr>
-                <td colSpan={5}>
-                  <strong>Result:</strong>{" "}
-                  <span className={`status status-${inspection.status}`}>{inspection.status}</span>
-                </td>
-              </tr>
-            </tbody>
-          </table>
+        <header className="report-header">
+          <div className="report-logo-box">
+            <img src={logo} alt="" className="report-logo" />
+          </div>
+          <div className="report-company-info">
+            <div className="report-company-name">{COMPANY.name}</div>
+            <div className="report-company-tagline">{COMPANY.tagline}</div>
+            <div className="report-company-detail">{COMPANY.address}</div>
+            <div className="report-company-detail">
+              Tel: {COMPANY.tel} &nbsp;·&nbsp; Fax: {COMPANY.fax}
+            </div>
+          </div>
+          <div className="report-title-block">
+            <h1>Final Inspection Data Sheet</h1>
+            <div className="type-indicator">
+              {TYPE_LABELS.map(([key, label]) => (
+                <span key={key} className={`type-chip${inspection.type === key ? " type-chip-active" : ""}`}>
+                  {label}
+                </span>
+              ))}
+            </div>
+          </div>
         </header>
+
+        <div className="report-meta-grid">
+          <div className="report-meta-item">
+            <span className="report-meta-label">Part #</span>
+            <span className="report-meta-value">{inspection.part_number}</span>
+          </div>
+          <div className="report-meta-item">
+            <span className="report-meta-label">Quantity</span>
+            <span className="report-meta-value">{inspection.quantity ?? "—"}</span>
+          </div>
+          <div className="report-meta-item">
+            <span className="report-meta-label">Customer</span>
+            <span className="report-meta-value">{inspection.customer || inspection.client_name}</span>
+          </div>
+          <div className="report-meta-item">
+            <span className="report-meta-label">Job# / WO#</span>
+            <span className="report-meta-value">{inspection.job_number || "—"}</span>
+          </div>
+
+          <div className="report-meta-item">
+            <span className="report-meta-label">Sampling Plan N</span>
+            <span className="report-meta-value">{inspection.sampling_plan_n ?? "—"}</span>
+          </div>
+          <div className="report-meta-item">
+            <span className="report-meta-label">Sampling Plan C</span>
+            <span className="report-meta-value">{inspection.sampling_plan_c ?? "—"}</span>
+          </div>
+          <div className="report-meta-item">
+            <span className="report-meta-label">By</span>
+            <span className="report-meta-value">{inspection.inspector || "—"}</span>
+          </div>
+          <div className="report-meta-item">
+            <span className="report-meta-label">Date</span>
+            <span className="report-meta-value">{inspection.date ? inspection.date.slice(0, 10) : "—"}</span>
+          </div>
+
+          <div className="report-meta-item report-meta-wide">
+            <span className="report-meta-label">Lot Disposition</span>
+            <span className="report-meta-value">{inspection.lot_disposition || "—"}</span>
+          </div>
+          <div className="report-meta-item report-meta-result">
+            <span className="report-meta-label">Result</span>
+            <span className={`result-badge result-badge-${inspection.status}`}>
+              {inspection.status === "approved" && <CheckIcon />}
+              {inspection.status === "rejected" && <XIcon />}
+              {inspection.status}
+            </span>
+          </div>
+        </div>
 
         <div className="table-scroll">
           <table className="sheet-table">
@@ -112,33 +185,35 @@ export default function InspectionSheet() {
               </tr>
             </thead>
             <tbody>
-              <tr>
+              <tr className="sheet-spec-row">
                 <td>Max. Spec.</td>
                 {points.map((p) => (
-                  <td key={p.id}>{p.max_spec != null ? `${p.max_spec}${p.unit || ""}` : "—"}</td>
+                  <td key={p.id}>{p.max_spec != null ? p.max_spec.toFixed(p.decimal_places ?? 3) : "—"}</td>
                 ))}
               </tr>
-              <tr>
+              <tr className="sheet-spec-row">
                 <td>MEAN</td>
                 {points.map((p) => (
-                  <td key={p.id}>{p.mean_value != null ? `${p.mean_value}${p.unit || ""}` : "—"}</td>
+                  <td key={p.id}>{p.mean_value != null ? p.mean_value.toFixed(p.decimal_places ?? 3) : "—"}</td>
                 ))}
               </tr>
-              <tr>
+              <tr className="sheet-spec-row sheet-spec-row-last">
                 <td>Min. Spec.</td>
                 {points.map((p) => (
-                  <td key={p.id}>{p.min_spec != null ? `${p.min_spec}${p.unit || ""}` : "—"}</td>
+                  <td key={p.id}>{p.min_spec != null ? p.min_spec.toFixed(p.decimal_places ?? 3) : "—"}</td>
                 ))}
               </tr>
-              {samples.map((s) => (
-                <tr key={s}>
+              {samples.map((s, i) => (
+                <tr key={s} className={i % 2 === 1 ? "sheet-row-alt" : ""}>
                   <td>{Number.isInteger(s) ? s : s.toFixed(1)}</td>
                   {points.map((p) => {
                     const cell = grid[`${p.id}:${s}`];
                     const within = cell?.within_tolerance;
+                    const fail = within === 0;
                     return (
-                      <td key={p.id} className={within === 0 ? "sheet-cell-fail" : ""}>
-                        {cell?.measured_value ?? "—"}
+                      <td key={p.id} className={fail ? "sheet-cell-fail" : ""}>
+                        {fail && <WarningIcon />}
+                        {cell?.measured_value != null ? cell.measured_value.toFixed(p.decimal_places ?? 3) : "—"}
                       </td>
                     );
                   })}
@@ -149,18 +224,28 @@ export default function InspectionSheet() {
         </div>
 
         {inspection.notes && (
-          <p>
+          <p className="report-notes">
             <strong>Notes:</strong> {inspection.notes}
           </p>
         )}
 
         <div className="sheet-signature">
           <div>
-            <div className="signature-line" />
-            <span className="muted">Inspector signature</span>
+            {signature ? (
+              <div className="signature-script">{signature.full_name}</div>
+            ) : (
+              <div className="signature-line" />
+            )}
+            <span className="muted">
+              Inspector signature{signature ? " · electronically signed" : ""}
+            </span>
           </div>
           <div>
-            <div className="signature-line" />
+            {signature ? (
+              <div className="signature-value">{formatDateTime(signature.signed_at)}</div>
+            ) : (
+              <div className="signature-line" />
+            )}
             <span className="muted">Date</span>
           </div>
         </div>

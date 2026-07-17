@@ -1,7 +1,12 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api } from "../api/client";
+import { inspectionLabel } from "../lib/format";
 
+// The "Data Sheet" folder at the top is the entry point an inspector opens
+// every time an inspection is needed: it resumes the currently open (in
+// progress) Data Sheet, or starts a fresh one if the last one was signed and
+// locked. Every past Data Sheet (open or signed) is listed below it by date.
 export default function Inspections() {
   const { partId } = useParams();
   const navigate = useNavigate();
@@ -9,7 +14,8 @@ export default function Inspections() {
   const [inspections, setInspections] = useState([]);
   const [drawings, setDrawings] = useState([]);
   const [error, setError] = useState(null);
-  const [creating, setCreating] = useState(false);
+  const [opening, setOpening] = useState(false);
+  const [contextMenu, setContextMenu] = useState(null); // { inspectionId, x, y }
 
   const load = () => {
     api.getPart(partId).then(setPart).catch((e) => setError(e.message));
@@ -21,12 +27,40 @@ export default function Inspections() {
     load();
   }, [partId]);
 
-  const createInspection = async () => {
+  useEffect(() => {
+    if (!contextMenu) return;
+    const close = () => setContextMenu(null);
+    window.addEventListener("click", close);
+    window.addEventListener("scroll", close, true);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("scroll", close, true);
+    };
+  }, [contextMenu]);
+
+  const handleContextMenu = (e, inspection) => {
+    e.preventDefault();
+    setContextMenu({ inspectionId: inspection.id, x: e.clientX, y: e.clientY });
+  };
+
+  const handleDelete = async (inspection) => {
+    setContextMenu(null);
+    if (!window.confirm("Are you sure you want to delete this inspection?")) return;
+    try {
+      await api.deleteInspection(inspection.id);
+      load();
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
+  const openDataSheet = async () => {
     if (drawings.length === 0) {
-      setError("This part doesn't have a Drawing set up yet. Set it up first.");
+      setError("This part doesn't have a Data Sheet Template set up yet. Set it up first.");
       return;
     }
-    setCreating(true);
+    setOpening(true);
+    setError(null);
     try {
       const drawing = drawings[0]; // uses the most recent one (phase 1: a single active version)
       const inspection = await api.createInspection({
@@ -38,37 +72,48 @@ export default function Inspections() {
     } catch (e) {
       setError(e.message);
     } finally {
-      setCreating(false);
+      setOpening(false);
     }
   };
 
   return (
     <div className="page">
-      <Link to={`/clients`} className="back-link">
-        ← Customers
+      <Link to={part ? `/clients/${part.client_id}/parts` : "/clients"} className="back-link">
+        ← Parts
       </Link>
-      <h1>Data Sheets — {part?.part_number ?? `Part #${partId}`}</h1>
+      <h1>{part?.part_number ?? `Part #${partId}`}</h1>
 
-      <div className="actions-row">
-        <button onClick={createInspection} disabled={creating}>
-          + New Data Sheet
-        </button>
-        <Link to={`/parts/${partId}/drawing`} className="secondary-link">
-          Set up Drawing
-        </Link>
-      </div>
+      <button className="datasheet-file" onClick={openDataSheet} disabled={opening}>
+        <svg
+          className="datasheet-file-icon"
+          width="32"
+          height="32"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.8"
+        >
+          <path d="M3 7a2 2 0 0 1 2-2h3.5l1.5 2H19a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" />
+        </svg>
+        <span className="datasheet-file-label">Data Sheet — {part?.part_number ?? `Part #${partId}`}</span>
+      </button>
+      <Link to={`/parts/${partId}/template`} className="secondary-link">
+        Data Sheet Template
+      </Link>
 
       {error && <p className="error">{error}</p>}
 
+      <h2>Inspection History</h2>
+      <p className="muted">Right-click an inspection to delete it.</p>
       {groupByYear(inspections).map(([year, yearInspections]) => (
         <div key={year}>
-          <h2>{year}</h2>
+          <h3>{year}</h3>
           <ul className="card-list">
             {yearInspections.map((i) => (
-              <li key={i.id} className="card">
+              <li key={i.id} className="card" onContextMenu={(e) => handleContextMenu(e, i)}>
                 <Link to={`/inspections/${i.id}`}>
-                  <strong>Data Sheet</strong>
-                  <span className="muted"> · {i.date} · </span>
+                  <strong>{inspectionLabel(i)}</strong>
+                  <span className="muted"> · </span>
                   <span className={`status status-${i.status}`}>{i.status}</span>
                 </Link>
               </li>
@@ -76,7 +121,18 @@ export default function Inspections() {
           </ul>
         </div>
       ))}
-      {inspections.length === 0 && <p className="muted">No Data Sheets for this part yet.</p>}
+      {inspections.length === 0 && <p className="muted">No inspections recorded for this part yet.</p>}
+
+      {contextMenu && (
+        <ul className="context-menu" style={{ top: contextMenu.y, left: contextMenu.x }}>
+          <li
+            className="context-menu-danger"
+            onClick={() => handleDelete(inspections.find((i) => i.id === contextMenu.inspectionId))}
+          >
+            Delete
+          </li>
+        </ul>
+      )}
     </div>
   );
 }

@@ -46,11 +46,21 @@ router.put("/:id", (req, res) => {
   res.json(part);
 });
 
-// DELETE /api/parts/:id
+// DELETE /api/parts/:id  (cascades to its drawings/inspections; blocked if any
+// inspection already has recorded measurements, to protect quality records)
 router.delete("/:id", (req, res) => {
-  const result = db.prepare("DELETE FROM parts WHERE id = ?").run(req.params.id);
-  if (result.changes === 0) return res.status(404).json({ error: "Part not found" });
-  res.status(204).send();
+  try {
+    const result = db.prepare("DELETE FROM parts WHERE id = ?").run(req.params.id);
+    if (result.changes === 0) return res.status(404).json({ error: "Part not found" });
+    res.status(204).send();
+  } catch (err) {
+    if (err.code === "SQLITE_CONSTRAINT_FOREIGNKEY" || err.code === "SQLITE_CONSTRAINT_TRIGGER") {
+      return res.status(409).json({
+        error: "This part can't be deleted because it already has recorded inspection measurements.",
+      });
+    }
+    throw err;
+  }
 });
 
 module.exports = router;

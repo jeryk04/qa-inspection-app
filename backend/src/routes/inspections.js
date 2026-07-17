@@ -91,12 +91,11 @@ function getInspectionDetail(id) {
 
   const measurements = db
     .prepare(
-      `SELECT m.*, bp.balloon_number, bp.description, bp.max_spec,
-              bp.min_spec, bp.mean_value, bp.unit
+      `SELECT m.*, bp.balloon_number, bp.max_spec, bp.min_spec, bp.mean_value, bp.sort_order, bp.decimal_places
        FROM measurements m
        JOIN balloon_points bp ON bp.id = m.balloon_point_id
        WHERE m.inspection_id = ?
-       ORDER BY bp.balloon_number, m.sample_number`
+       ORDER BY bp.sort_order, m.sample_number`
     )
     .all(id);
 
@@ -106,13 +105,23 @@ function getInspectionDetail(id) {
   const points = inspection.drawing_id
     ? db
         .prepare(
-          `SELECT id, balloon_number, description, max_spec, min_spec, mean_value, unit
-           FROM balloon_points WHERE drawing_id = ? ORDER BY balloon_number`
+          `SELECT id, balloon_number, max_spec, min_spec, mean_value, decimal_places
+           FROM balloon_points WHERE drawing_id = ? ORDER BY sort_order`
         )
         .all(inspection.drawing_id)
     : [];
 
-  return { ...inspection, measurements, points };
+  // The electronic signature that approved/rejected this Data Sheet, if it's
+  // been signed — used by both the on-screen report and the PDF export.
+  const signature = db
+    .prepare(
+      `SELECT s.action, s.signed_at, u.full_name
+       FROM signatures s JOIN users u ON u.id = s.user_id
+       WHERE s.inspection_id = ? ORDER BY s.signed_at DESC LIMIT 1`
+    )
+    .get(id);
+
+  return { ...inspection, measurements, points, signature: signature || null };
 }
 
 // GET /api/inspections/:id  (includes measurements + specs for each balloon)
@@ -145,9 +154,23 @@ router.get("/:id/audit", (req, res) => {
 });
 
 // POST /api/inspections  (creates the inspection; body: part_id, drawing_id, type + optional header fields)
+// Only one *open* (in_progress) Data Sheet per part+type at a time: if one is
+// already open it's resumed instead of creating a duplicate. Once a Data
+// Sheet is signed (approved/rejected) it's locked history, and the next click
+// starts a new one.
 router.post("/", (req, res) => {
   const { part_id, drawing_id, type } = req.body;
   if (!part_id || !type) return res.status(400).json({ error: "part_id and type are required" });
+
+  const openExisting = db
+    .prepare("SELECT * FROM inspections WHERE part_id = ? AND type = ? AND status = 'in_progress'")
+    .get(part_id, type);
+  if (openExisting) return res.json(openExisting);
+
+  const part = db
+    .prepare(`SELECT p.*, c.name AS client_name FROM parts p JOIN clients c ON c.id = p.client_id WHERE p.id = ?`)
+    .get(part_id);
+  if (!part) return res.status(404).json({ error: "Part not found" });
 
   const columns = ["part_id", "drawing_id", "type", "created_by", "updated_by", ...HEADER_FIELDS];
   const values = [
@@ -156,7 +179,10 @@ router.post("/", (req, res) => {
     type,
     req.user.id,
     req.user.id,
-    ...HEADER_FIELDS.map((f) => req.body[f] ?? null),
+    // "customer" defaults to the customer folder this part lives under —
+    // still just a free-text field afterward, in case the paper form's
+    // customer ever needs to differ from the client record (e.g. drop-ship).
+    ...HEADER_FIELDS.map((f) => (f === "customer" ? req.body.customer ?? part.client_name : req.body[f] ?? null)),
   ];
 
   const result = db
@@ -172,7 +198,8 @@ router.post("/", (req, res) => {
 });
 
 // PUT /api/inspections/:id  (updates header fields: customer, heat, quantity, supplier,
-// po_number, customer_po_number, operation, job_number, inspector, sampling plan, lot_disposition, notes)
+// po_number, customer_po_number, operation, job_number, inspector, sampling plan,
+// lot_disposition, notes, date)
 router.put("/:id", (req, res) => {
   const existing = db.prepare("SELECT * FROM inspections WHERE id = ?").get(req.params.id);
   if (!existing) return res.status(404).json({ error: "Inspection not found" });
@@ -180,16 +207,22 @@ router.put("/:id", (req, res) => {
     return res.status(409).json({ error: "This Data Sheet has been signed and can no longer be edited." });
   }
 
+  // "date" is the manually-entered inspection date (not a creation timestamp),
+  // so it's editable here alongside the rest of the header — kept out of
+  // HEADER_FIELDS since that list is also used by POST, where "date" should
+  // never be forced to NULL just because the client didn't send one.
+  const fields = [...HEADER_FIELDS, "date"];
+
   const changes = {};
-  HEADER_FIELDS.forEach((f) => {
+  fields.forEach((f) => {
     if (req.body[f] !== undefined && req.body[f] !== existing[f]) {
       changes[f] = { old: existing[f], new: req.body[f] };
     }
   });
 
-  const setClauses = HEADER_FIELDS.map((f) => `${f} = COALESCE(@${f}, ${f})`).join(", ");
+  const setClauses = fields.map((f) => `${f} = COALESCE(@${f}, ${f})`).join(", ");
   const values = { id: req.params.id, updated_by: req.user.id };
-  HEADER_FIELDS.forEach((f) => {
+  fields.forEach((f) => {
     values[f] = req.body[f] ?? null;
   });
 
@@ -272,6 +305,26 @@ router.put("/:id/measurements", (req, res) => {
   res.json(updated);
 });
 
+// DELETE /api/inspections/:id/measurements/:sampleNumber  (removes one sample row)
+router.delete("/:id/measurements/:sampleNumber", (req, res) => {
+  const inspection = db.prepare("SELECT status FROM inspections WHERE id = ?").get(req.params.id);
+  if (!inspection) return res.status(404).json({ error: "Inspection not found" });
+  if (inspection.status !== "in_progress") {
+    return res.status(409).json({ error: "This Data Sheet has been signed and can no longer be edited." });
+  }
+
+  db.prepare("DELETE FROM measurements WHERE inspection_id = ? AND sample_number = ?").run(
+    req.params.id,
+    Number(req.params.sampleNumber)
+  );
+
+  recordAudit("inspection", req.params.id, "sample_deleted", req.user.id, {
+    sample_number: req.params.sampleNumber,
+  });
+
+  res.status(204).send();
+});
+
 // PUT /api/inspections/:id/status  (approve/reject, requires an electronic-signature confirmation)
 // body: { status: 'approved' | 'rejected', signer_name: string }
 router.put("/:id/status", (req, res) => {
@@ -280,10 +333,16 @@ router.put("/:id/status", (req, res) => {
     return res.status(400).json({ error: "status must be 'approved' or 'rejected'" });
   }
 
-  const existing = db.prepare("SELECT status FROM inspections WHERE id = ?").get(req.params.id);
+  const existing = db.prepare("SELECT status, inspector FROM inspections WHERE id = ?").get(req.params.id);
   if (!existing) return res.status(404).json({ error: "Inspection not found" });
   if (existing.status !== "in_progress") {
     return res.status(409).json({ error: "This Data Sheet has already been signed." });
+  }
+
+  if (!existing.inspector || !existing.inspector.trim()) {
+    return res.status(400).json({
+      error: "Set and save the inspector name (By) before approving or rejecting this Data Sheet.",
+    });
   }
 
   if (!signer_name || signer_name.trim().toLowerCase() !== req.user.full_name.trim().toLowerCase()) {
@@ -309,22 +368,21 @@ router.put("/:id/status", (req, res) => {
   res.json(inspection);
 });
 
+// DELETE /api/inspections/:id  (cascades to its measurements and signatures)
+router.delete("/:id", (req, res) => {
+  const result = db.prepare("DELETE FROM inspections WHERE id = ?").run(req.params.id);
+  if (result.changes === 0) return res.status(404).json({ error: "Inspection not found" });
+  res.status(204).send();
+});
+
 // GET /api/inspections/:id/pdf  (renders the Data Sheet as a downloadable PDF)
 router.get("/:id/pdf", (req, res) => {
   const inspection = getInspectionDetail(req.params.id);
   if (!inspection) return res.status(404).json({ error: "Inspection not found" });
 
-  const signature = db
-    .prepare(
-      `SELECT s.action, s.signed_at, u.full_name
-       FROM signatures s JOIN users u ON u.id = s.user_id
-       WHERE s.inspection_id = ? ORDER BY s.signed_at DESC LIMIT 1`
-    )
-    .get(inspection.id);
-
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader("Content-Disposition", `inline; filename="inspection-${inspection.id}.pdf"`);
-  generateInspectionPdf(res, { ...inspection, signature });
+  generateInspectionPdf(res, inspection);
 });
 
 module.exports = router;

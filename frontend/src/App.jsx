@@ -5,7 +5,7 @@ import Login from "./pages/Login";
 import Clients from "./pages/Clients";
 import Parts from "./pages/Parts";
 import Inspections from "./pages/Inspections";
-import DrawingSetup from "./pages/DrawingSetup";
+import DataSheetTemplate from "./pages/DataSheetTemplate";
 import InspectionCapture from "./pages/InspectionCapture";
 import InspectionSheet from "./pages/InspectionSheet";
 import InspectionHistory from "./pages/InspectionHistory";
@@ -84,10 +84,10 @@ function AppShell() {
             }
           />
           <Route
-            path="/parts/:partId/drawing"
+            path="/parts/:partId/template"
             element={
               <RequireAuth>
-                <DrawingSetup />
+                <DataSheetTemplate />
               </RequireAuth>
             }
           />
