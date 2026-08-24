@@ -2,6 +2,9 @@ const express = require("express");
 const db = require("../db");
 const { generateInspectionPdf } = require("../pdf/inspectionSheet");
 const { recordAudit } = require("../lib/audit");
+const { signInspectionStatus } = require("../lib/inspectionSigning");
+const attachRole = require("../middleware/attachRole");
+const requireRole = require("../middleware/requireRole");
 
 const router = express.Router();
 
@@ -17,7 +20,6 @@ const HEADER_FIELDS = [
   "inspector",
   "sampling_plan_n",
   "sampling_plan_c",
-  "lot_disposition",
   "notes",
 ];
 
@@ -26,6 +28,9 @@ const HEADER_FIELDS = [
 // is set, since there's nothing to check the measurement against.
 function computeWithinTolerance(point, measuredValue) {
   if (!point || measuredValue == null) return null;
+  // Points with no spec accept free text (e.g. "OK" on a Fixture check) --
+  // never numerically comparable, so nothing to flag.
+  if (typeof measuredValue !== "number" || Number.isNaN(measuredValue)) return null;
   const hasMax = point.max_spec != null;
   const hasMin = point.min_spec != null;
   if (!hasMax && !hasMin) return null;
@@ -34,9 +39,9 @@ function computeWithinTolerance(point, measuredValue) {
   return 1;
 }
 
-// GET /api/inspections?part_id=1&type=final&client_id=1&status=approved&date_from=2026-01-01&date_to=2026-12-31
+// GET /api/inspections?part_id=1&type=final&client_id=1&status=approved&date_from=2026-01-01&date_to=2026-12-31&operation_id=1
 router.get("/", (req, res) => {
-  const { part_id, type, client_id, status, date_from, date_to } = req.query;
+  const { part_id, type, client_id, status, date_from, date_to, operation_id } = req.query;
 
   let query = `
     SELECT i.*, p.part_number, p.client_id, c.name AS client_name
@@ -55,11 +60,22 @@ router.get("/", (req, res) => {
     query += " AND i.type = ?";
     params.push(type);
   }
+  if (operation_id) {
+    query += " AND i.operation_id = ?";
+    params.push(operation_id);
+  }
   if (client_id) {
     query += " AND p.client_id = ?";
     params.push(client_id);
   }
-  if (status) {
+  // 'conditionally_approved' isn't a real i.status value (see PUT
+  // /:id/status) -- it's status='approved' with a reason attached, so the
+  // filter has to distinguish it from a plain approval by that instead.
+  if (status === "conditionally_approved") {
+    query += " AND i.status = 'approved' AND i.conditional_reason IS NOT NULL AND i.conditional_reason != ''";
+  } else if (status === "approved") {
+    query += " AND i.status = 'approved' AND (i.conditional_reason IS NULL OR i.conditional_reason = '')";
+  } else if (status) {
     query += " AND i.status = ?";
     params.push(status);
   }
@@ -70,6 +86,33 @@ router.get("/", (req, res) => {
   if (date_to) {
     query += " AND i.date <= ?";
     params.push(date_to + " 23:59:59");
+  }
+  query += " ORDER BY i.date DESC";
+
+  res.json(db.prepare(query).all(...params));
+});
+
+// GET /api/inspections/status-lookup?part_number=...&job_number=...  (operator floor
+// lookup: lightweight status info only, no measurements/full detail)
+// Scoped to inspections created_by the logged-in user's id (a real FK match,
+// not a free-text comparison against the inspector field) --
+// deliberately scoped per-operator for now (an operator only sees their own work),
+// can be loosened to company-wide visibility later if needed.
+router.get("/status-lookup", attachRole, requireRole("operator", "qc", "admin"), (req, res) => {
+  const { part_number, job_number } = req.query;
+  if (!part_number) return res.status(400).json({ error: "part_number is required" });
+
+  let query = `
+    SELECT i.id, p.part_number, i.job_number, i.type, i.status, i.conditional_reason, i.date, i.inspector
+    FROM inspections i
+    JOIN parts p ON p.id = i.part_id
+    WHERE LOWER(p.part_number) = LOWER(?) AND i.created_by = ?
+  `;
+  const params = [part_number, req.user.id];
+
+  if (job_number) {
+    query += " AND i.job_number = ?";
+    params.push(job_number);
   }
   query += " ORDER BY i.date DESC";
 
@@ -153,18 +196,37 @@ router.get("/:id/audit", (req, res) => {
   );
 });
 
-// POST /api/inspections  (creates the inspection; body: part_id, drawing_id, type + optional header fields)
-// Only one *open* (in_progress) Data Sheet per part+type at a time: if one is
-// already open it's resumed instead of creating a duplicate. Once a Data
-// Sheet is signed (approved/rejected) it's locked history, and the next click
-// starts a new one.
+// POST /api/inspections  (creates the inspection; body: part_id or operation_id,
+// drawing_id, type + optional header fields)
+// Only one *open* (in_progress) Data Sheet per part+type at a time (scoped
+// further by operation_id when set, so two different operations on the same
+// part each get their own open in-process Data Sheet instead of resuming each
+// other's): if one is already open it's resumed instead of creating a
+// duplicate. Once a Data Sheet is signed (approved/rejected) it's locked
+// history, and the next click starts a new one.
 router.post("/", (req, res) => {
-  const { part_id, drawing_id, type } = req.body;
-  if (!part_id || !type) return res.status(400).json({ error: "part_id and type are required" });
+  const { drawing_id, type } = req.body;
+  let { part_id, operation_id } = req.body;
+  if (!type) return res.status(400).json({ error: "type is required" });
 
-  const openExisting = db
-    .prepare("SELECT * FROM inspections WHERE part_id = ? AND type = ? AND status = 'in_progress'")
-    .get(part_id, type);
+  if (operation_id) {
+    // Never trust a client-supplied part_id when operation_id is set --
+    // resolve it from the operation itself, so the two can't mismatch (same
+    // pattern as POST /api/drawings).
+    const operation = db.prepare("SELECT part_id FROM operations WHERE id = ?").get(operation_id);
+    if (!operation) return res.status(404).json({ error: "Operation not found" });
+    part_id = operation.part_id;
+  } else if (!part_id) {
+    return res.status(400).json({ error: "part_id is required (or operation_id)" });
+  }
+
+  const openExisting = operation_id
+    ? db
+        .prepare("SELECT * FROM inspections WHERE part_id = ? AND type = ? AND operation_id = ? AND status = 'in_progress'")
+        .get(part_id, type, operation_id)
+    : db
+        .prepare("SELECT * FROM inspections WHERE part_id = ? AND type = ? AND operation_id IS NULL AND status = 'in_progress'")
+        .get(part_id, type);
   if (openExisting) return res.json(openExisting);
 
   const part = db
@@ -172,11 +234,12 @@ router.post("/", (req, res) => {
     .get(part_id);
   if (!part) return res.status(404).json({ error: "Part not found" });
 
-  const columns = ["part_id", "drawing_id", "type", "created_by", "updated_by", ...HEADER_FIELDS];
+  const columns = ["part_id", "drawing_id", "type", "operation_id", "created_by", "updated_by", ...HEADER_FIELDS];
   const values = [
     part_id,
     drawing_id || null,
     type,
+    operation_id || null,
     req.user.id,
     req.user.id,
     // "customer" defaults to the customer folder this part lives under —
@@ -191,7 +254,7 @@ router.post("/", (req, res) => {
     )
     .run(...values);
 
-  recordAudit("inspection", result.lastInsertRowid, "created", req.user.id, { type, part_id });
+  recordAudit("inspection", result.lastInsertRowid, "created", req.user.id, { type, part_id, operation_id: operation_id || null });
 
   const inspection = db.prepare("SELECT * FROM inspections WHERE id = ?").get(result.lastInsertRowid);
   res.status(201).json(inspection);
@@ -326,11 +389,17 @@ router.delete("/:id/measurements/:sampleNumber", (req, res) => {
 });
 
 // PUT /api/inspections/:id/status  (approve/reject, requires an electronic-signature confirmation)
-// body: { status: 'approved' | 'rejected', signer_name: string }
-router.put("/:id/status", (req, res) => {
-  const { status, signer_name } = req.body;
-  if (!["approved", "rejected"].includes(status)) {
-    return res.status(400).json({ error: "status must be 'approved' or 'rejected'" });
+// body: { status: 'approved' | 'conditionally_approved' | 'rejected', signer_name: string, reason?: string }
+// 'conditionally_approved' is a UI-facing result only -- signatures.action and
+// inspections.status have no such value (both stay a plain 'approved' CHECK
+// enum), so it's stored as status='approved' plus a required conditional_reason.
+router.put("/:id/status", attachRole, requireRole("qc", "admin"), (req, res) => {
+  const { status, signer_name, reason } = req.body;
+  if (!["approved", "conditionally_approved", "rejected"].includes(status)) {
+    return res.status(400).json({ error: "status must be 'approved', 'conditionally_approved', or 'rejected'" });
+  }
+  if (status === "conditionally_approved" && !reason?.trim()) {
+    return res.status(400).json({ error: "reason is required to conditionally approve this Data Sheet" });
   }
 
   const existing = db.prepare("SELECT status, inspector FROM inspections WHERE id = ?").get(req.params.id);
@@ -349,27 +418,18 @@ router.put("/:id/status", (req, res) => {
     return res.status(400).json({ error: "signer_name must match your logged-in full name to sign" });
   }
 
-  const tx = db.transaction(() => {
-    db.prepare("UPDATE inspections SET status = ?, updated_by = ? WHERE id = ?").run(
-      status,
-      req.user.id,
-      req.params.id
-    );
-    db.prepare("INSERT INTO signatures (inspection_id, user_id, action) VALUES (?, ?, ?)").run(
-      req.params.id,
-      req.user.id,
-      status
-    );
-    recordAudit("inspection", req.params.id, "status_changed", req.user.id, { status });
-  });
-  tx();
+  const dbStatus = status === "conditionally_approved" ? "approved" : status;
+  const conditionalReason = status === "conditionally_approved" ? reason.trim() : null;
+
+  signInspectionStatus(db, { inspectionId: req.params.id, userId: req.user.id, status: dbStatus, conditionalReason });
+  recordAudit("inspection", req.params.id, "status_changed", req.user.id, { status, reason: conditionalReason });
 
   const inspection = db.prepare("SELECT * FROM inspections WHERE id = ?").get(req.params.id);
   res.json(inspection);
 });
 
 // DELETE /api/inspections/:id  (cascades to its measurements and signatures)
-router.delete("/:id", (req, res) => {
+router.delete("/:id", attachRole, requireRole("qc", "admin"), (req, res) => {
   const result = db.prepare("DELETE FROM inspections WHERE id = ?").run(req.params.id);
   if (result.changes === 0) return res.status(404).json({ error: "Inspection not found" });
   res.status(204).send();

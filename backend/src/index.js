@@ -15,7 +15,23 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "http://localhost:5173";
 
-app.use(cors({ origin: FRONTEND_ORIGIN, credentials: true }));
+// Also allow the frontend when it's opened from another device on the local
+// network (e.g. a tablet testing the shop-floor UI) -- matches
+// http(s)://<private-LAN-ip>:<any port> (dev server, preview build, etc.) in
+// addition to the configured origin.
+const LAN_ORIGIN_RE = /^https?:\/\/(10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}):\d+$/;
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      if (!origin || origin === FRONTEND_ORIGIN || LAN_ORIGIN_RE.test(origin)) {
+        return callback(null, true);
+      }
+      callback(new Error("Not allowed by CORS"));
+    },
+    credentials: true,
+  })
+);
 app.use(express.json());
 app.use(cookieParser());
 app.use("/uploads", express.static(path.join(__dirname, "..", "uploads")));

@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
-import { inspectionLabel } from "../lib/format";
+import { inspectionLabel, resultStatus, resultLabel } from "../lib/format";
+import { useConfirm } from "../hooks/useConfirm";
 
 // The "Data Sheet" folder at the top is the entry point an inspector opens
 // every time an inspection is needed: it resumes the currently open (in
@@ -10,22 +11,27 @@ import { inspectionLabel } from "../lib/format";
 export default function Inspections() {
   const { partId } = useParams();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  // Defaults to "final" -- the original, still-only-supported value for the
+  // normal QC path (see Clients.jsx for where a non-default type comes from).
+  const type = searchParams.get("type") || "final";
   const [part, setPart] = useState(null);
   const [inspections, setInspections] = useState([]);
   const [drawings, setDrawings] = useState([]);
   const [error, setError] = useState(null);
   const [opening, setOpening] = useState(false);
   const [contextMenu, setContextMenu] = useState(null); // { inspectionId, x, y }
+  const [confirm, confirmDialog] = useConfirm();
 
   const load = () => {
     api.getPart(partId).then(setPart).catch((e) => setError(e.message));
-    api.getInspections({ part_id: partId, type: "final" }).then(setInspections).catch((e) => setError(e.message));
+    api.getInspections({ part_id: partId, type }).then(setInspections).catch((e) => setError(e.message));
     api.getDrawings(partId).then(setDrawings).catch((e) => setError(e.message));
   };
 
   useEffect(() => {
     load();
-  }, [partId]);
+  }, [partId, type]);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -45,7 +51,7 @@ export default function Inspections() {
 
   const handleDelete = async (inspection) => {
     setContextMenu(null);
-    if (!window.confirm("Are you sure you want to delete this inspection?")) return;
+    if (!(await confirm("Are you sure you want to delete this inspection?"))) return;
     try {
       await api.deleteInspection(inspection.id);
       load();
@@ -66,7 +72,7 @@ export default function Inspections() {
       const inspection = await api.createInspection({
         part_id: Number(partId),
         drawing_id: drawing.id,
-        type: "final",
+        type,
       });
       navigate(`/inspections/${inspection.id}`);
     } catch (e) {
@@ -78,7 +84,14 @@ export default function Inspections() {
 
   return (
     <div className="page">
-      <Link to={part ? `/clients/${part.client_id}/parts` : "/clients"} className="back-link">
+      <Link
+        to={
+          part
+            ? `/clients/${part.client_id}/parts${type !== "final" ? `?type=${type}` : ""}`
+            : "/clients"
+        }
+        className="back-link"
+      >
         ← Parts
       </Link>
       <h1>{part?.part_number ?? `Part #${partId}`}</h1>
@@ -114,7 +127,7 @@ export default function Inspections() {
                 <Link to={`/inspections/${i.id}`}>
                   <strong>{inspectionLabel(i)}</strong>
                   <span className="muted"> · </span>
-                  <span className={`status status-${i.status}`}>{i.status}</span>
+                  <span className={`status status-${resultStatus(i)}`}>{resultLabel(resultStatus(i))}</span>
                 </Link>
               </li>
             ))}
@@ -133,6 +146,7 @@ export default function Inspections() {
           </li>
         </ul>
       )}
+      {confirmDialog}
     </div>
   );
 }

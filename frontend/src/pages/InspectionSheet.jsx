@@ -1,7 +1,12 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api/client";
+import { resultStatus, resultLabel } from "../lib/format";
 import logo from "../assets/logo.png";
+
+// Same fallback pattern as api/client.js -- not exported from there, so
+// repeated locally (matches InspectionCapture.jsx/DataSheetTemplate.jsx).
+const BASE_URL = import.meta.env.VITE_API_URL || `http://${window.location.hostname}:3001/api`;
 
 // Matches the schema's `type` enum — Phase 1 only ever creates 'final'.
 const TYPE_LABELS = [
@@ -12,6 +17,15 @@ const TYPE_LABELS = [
   ["final", "Final"],
   ["other", "Other"],
 ];
+
+const TYPE_TITLES = {
+  quote: "Quote Inspection Data Sheet",
+  incoming: "Incoming Inspection Data Sheet",
+  setup: "Set-up Inspection Data Sheet",
+  in_process: "In-Process Inspection Data Sheet",
+  final: "Final Inspection Data Sheet",
+  other: "Inspection Data Sheet",
+};
 
 const COMPANY = {
   name: "G & J STEEL & TUBING, INC.",
@@ -85,6 +99,7 @@ export default function InspectionSheet() {
   if (!inspection) return <p>Loading...</p>;
 
   const points = drawing?.points ?? [];
+  const result = resultStatus(inspection);
   const samples = [...new Set(inspection.measurements.map((m) => m.sample_number))].sort((a, b) => a - b);
   const grid = Object.fromEntries(
     inspection.measurements.map((m) => [`${m.balloon_point_id}:${m.sample_number}`, m])
@@ -97,7 +112,9 @@ export default function InspectionSheet() {
         <Link to={`/inspections/${inspectionId}`} className="back-link">
           ← Back to capture
         </Link>
-        <button onClick={() => window.print()}>Print / Export PDF</button>
+        <button onClick={() => window.open(`${BASE_URL}/inspections/${inspectionId}/pdf`, "_blank")}>
+          Print / Export PDF
+        </button>
       </div>
 
       <div className="sheet">
@@ -114,7 +131,7 @@ export default function InspectionSheet() {
             </div>
           </div>
           <div className="report-title-block">
-            <h1>Final Inspection Data Sheet</h1>
+            <h1>{TYPE_TITLES[inspection.type] ?? "Inspection Data Sheet"}</h1>
             <div className="type-indicator">
               {TYPE_LABELS.map(([key, label]) => (
                 <span key={key} className={`type-chip${inspection.type === key ? " type-chip-active" : ""}`}>
@@ -160,16 +177,18 @@ export default function InspectionSheet() {
             <span className="report-meta-value">{inspection.date ? inspection.date.slice(0, 10) : "—"}</span>
           </div>
 
-          <div className="report-meta-item report-meta-wide">
-            <span className="report-meta-label">Lot Disposition</span>
-            <span className="report-meta-value">{inspection.lot_disposition || "—"}</span>
-          </div>
+          {result === "conditionally_approved" && (
+            <div className="report-meta-item report-meta-wide">
+              <span className="report-meta-label">Reason</span>
+              <span className="report-meta-value">{inspection.conditional_reason}</span>
+            </div>
+          )}
           <div className="report-meta-item report-meta-result">
             <span className="report-meta-label">Result</span>
-            <span className={`result-badge result-badge-${inspection.status}`}>
-              {inspection.status === "approved" && <CheckIcon />}
-              {inspection.status === "rejected" && <XIcon />}
-              {inspection.status}
+            <span className={`result-badge result-badge-${result}`}>
+              {(result === "approved" || result === "conditionally_approved") && <CheckIcon />}
+              {result === "rejected" && <XIcon />}
+              {resultLabel(result)}
             </span>
           </div>
         </div>
@@ -213,7 +232,11 @@ export default function InspectionSheet() {
                     return (
                       <td key={p.id} className={fail ? "sheet-cell-fail" : ""}>
                         {fail && <WarningIcon />}
-                        {cell?.measured_value != null ? cell.measured_value.toFixed(p.decimal_places ?? 3) : "—"}
+                        {cell?.measured_value != null
+                          ? typeof cell.measured_value === "number"
+                            ? cell.measured_value.toFixed(p.decimal_places ?? 3)
+                            : cell.measured_value
+                          : "—"}
                       </td>
                     );
                   })}

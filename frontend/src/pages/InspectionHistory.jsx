@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api/client";
+import { resultStatus, resultLabel } from "../lib/format";
 
 export default function InspectionHistory() {
   const [clients, setClients] = useState([]);
@@ -87,6 +88,7 @@ export default function InspectionHistory() {
           <option value="">Any status</option>
           <option value="in_progress">In progress</option>
           <option value="approved">Approved</option>
+          <option value="conditionally_approved">Conditionally approved</option>
           <option value="rejected">Rejected</option>
         </select>
 
@@ -123,7 +125,7 @@ export default function InspectionHistory() {
                 <td>{i.type}</td>
                 <td>{i.date}</td>
                 <td>
-                  <span className={`status status-${i.status}`}>{i.status}</span>
+                  <span className={`status status-${resultStatus(i)}`}>{resultLabel(resultStatus(i))}</span>
                 </td>
                 <td>
                   <Link to={`/inspections/${i.id}`}>Open</Link>

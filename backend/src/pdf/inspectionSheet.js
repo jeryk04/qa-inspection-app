@@ -15,8 +15,24 @@ const COLOR = {
   failFill: "#fdecea",
   fail: "#c62828",
   ok: "#2e7d32",
+  conditional: "#1d5fa8",
   warn: "#8a6d00",
 };
+
+const RESULT_LABELS = {
+  in_progress: "IN PROGRESS",
+  approved: "APPROVED",
+  conditionally_approved: "CONDITIONALLY APPROVED",
+  rejected: "REJECTED",
+};
+
+// 'conditionally_approved' isn't a real inspections.status value (see
+// PUT /:id/status in routes/inspections.js) -- it's status='approved' with a
+// conditional_reason attached, so the PDF/UI-facing result has to be derived.
+function getResult(inspection) {
+  if (inspection.status === "approved" && inspection.conditional_reason) return "conditionally_approved";
+  return inspection.status;
+}
 
 // Matches the printed header on the company's paper Data Sheet.
 const COMPANY = {
@@ -39,6 +55,15 @@ const TYPE_ROWS = [
     ["other", "Other"],
   ],
 ];
+
+const TYPE_TITLES = {
+  quote: "QUOTE INSPECTION DATA SHEET",
+  incoming: "INCOMING INSPECTION DATA SHEET",
+  setup: "SET-UP INSPECTION DATA SHEET",
+  in_process: "IN-PROCESS INSPECTION DATA SHEET",
+  final: "FINAL INSPECTION DATA SHEET",
+  other: "INSPECTION DATA SHEET",
+};
 
 function generateInspectionPdf(res, inspection) {
   const doc = new PDFDocument({ size: "letter", layout: "landscape", margin: PAGE_MARGIN });
@@ -92,10 +117,6 @@ function drawHeader(doc, inspection, pageNum, totalPages, pageWidth) {
 
   let y = topY;
 
-  // Dark rounded container behind the logo — the logo art has a black
-  // background, so it needs a matching dark backdrop on the white page
-  // rather than sitting on white directly.
-  doc.roundedRect(startX, y, logoBoxSize, logoBoxSize, 4).fill("#0a0a0a");
   if (fs.existsSync(LOGO_PATH)) {
     const pad = 5;
     doc.image(LOGO_PATH, startX + pad, y + pad, { fit: [logoBoxSize - pad * 2, logoBoxSize - pad * 2] });
@@ -106,7 +127,11 @@ function drawHeader(doc, inspection, pageNum, totalPages, pageWidth) {
     .font("Helvetica-Bold")
     .fontSize(15)
     .fillColor(COLOR.primary)
-    .text("FINAL INSPECTION DATA SHEET", typeX, y + 1, { width: typeBlockWidth + sheetWidth, height: 14, align: "center" });
+    .text(TYPE_TITLES[inspection.type] ?? "INSPECTION DATA SHEET", typeX, y + 1, {
+      width: typeBlockWidth + sheetWidth,
+      height: 14,
+      align: "center",
+    });
 
   y += 14;
   doc.font("Helvetica-Oblique").fontSize(7.5).fillColor(COLOR.accent).text(COMPANY.tagline, companyX, y, { width: companyWidth });
@@ -148,8 +173,11 @@ function drawHeader(doc, inspection, pageNum, totalPages, pageWidth) {
   ]);
   y += rowH;
 
-  drawFieldRow(doc, startX, y, fieldsWidth, rowH, [["Lot Disposition", inspection.lot_disposition]], 1);
-  y += rowH + 8;
+  if (getResult(inspection) === "conditionally_approved") {
+    drawFieldRow(doc, startX, y, fieldsWidth, rowH, [["Reason", inspection.conditional_reason]], 1);
+    y += rowH;
+  }
+  y += 8;
 
   doc.x = startX;
   doc.y = y;
@@ -164,30 +192,44 @@ function formatDate(value) {
 // "✓"/"✗" character renders as a garbled glyph — draw them as vector
 // strokes instead, positioned so the icon+label pair reads as centered.
 function drawResultBox(doc, x, y, w, h, inspection) {
-  const status = inspection.status;
-  const bg = status === "approved" ? COLOR.ok : status === "rejected" ? COLOR.fail : "#fff3cd";
-  const textColor = status === "in_progress" ? COLOR.warn : "#fff";
+  const result = getResult(inspection);
+  const bg =
+    result === "approved" ? COLOR.ok
+    : result === "conditionally_approved" ? COLOR.conditional
+    : result === "rejected" ? COLOR.fail
+    : "#fff3cd"; // in_progress
+  const textColor = result === "in_progress" ? COLOR.warn : "#fff";
   const boxY = y + 11;
   const boxH = h - 13;
 
   doc.font("Helvetica").fontSize(6).fillColor("#555").text("RESULT", x + 3, y + 2);
   doc.roundedRect(x, boxY, w, boxH, 5).fill(bg);
 
-  const label = status.toUpperCase();
-  doc.font("Helvetica-Bold").fontSize(13);
-  const labelWidth = doc.widthOfString(label);
-  const hasIcon = status === "approved" || status === "rejected";
+  const label = RESULT_LABELS[result] ?? result.toUpperCase();
+  const hasIcon = result === "approved" || result === "conditionally_approved" || result === "rejected";
   const iconSize = 10;
   const gap = 6;
+
+  // "CONDITIONALLY APPROVED" is much longer than the other labels -- shrink
+  // the font until it (plus the icon) fits the box instead of overflowing it.
+  let fontSize = 13;
+  doc.font("Helvetica-Bold").fontSize(fontSize);
+  const maxWidth = w - 12 - (hasIcon ? iconSize + gap : 0);
+  while (doc.widthOfString(label) > maxWidth && fontSize > 7) {
+    fontSize -= 1;
+    doc.fontSize(fontSize);
+  }
+  const labelWidth = doc.widthOfString(label);
+
   const totalWidth = labelWidth + (hasIcon ? iconSize + gap : 0);
   const iconX = x + (w - totalWidth) / 2;
   const textX = iconX + (hasIcon ? iconSize + gap : 0);
-  const textY = boxY + boxH / 2 - 6.5;
+  const textY = boxY + boxH / 2 - fontSize / 2;
 
   if (hasIcon) {
     const iconY = boxY + boxH / 2 - iconSize / 2;
     doc.lineWidth(1.6).strokeColor(textColor).lineJoin("round").lineCap("round");
-    if (status === "approved") {
+    if (result === "approved" || result === "conditionally_approved") {
       doc
         .moveTo(iconX, iconY + iconSize * 0.55)
         .lineTo(iconX + iconSize * 0.38, iconY + iconSize * 0.88)
@@ -266,7 +308,8 @@ function drawGrid(doc, pagePoints, samples, grid, pageWidth, labelColWidth) {
     drawCell(doc, startX, y, labelColWidth, rowH, sampleLabel, { bold: true, labelFill: true });
     pagePoints.forEach((p, i) => {
       const cell = grid[`${p.id}:${s}`];
-      const text = cell && cell.measured_value != null ? cell.measured_value.toFixed(p.decimal_places ?? 3) : "";
+      const raw = cell?.measured_value;
+      const text = raw == null ? "" : typeof raw === "number" ? raw.toFixed(p.decimal_places ?? 3) : String(raw);
       const outOfTolerance = Boolean(cell && cell.within_tolerance === 0);
       drawCell(doc, startX + labelColWidth + i * colW, y, colW, rowH, text, { danger: outOfTolerance, altFill: alt && !outOfTolerance });
     });

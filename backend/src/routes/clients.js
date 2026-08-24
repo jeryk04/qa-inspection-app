@@ -1,5 +1,7 @@
 const express = require("express");
 const db = require("../db");
+const attachRole = require("../middleware/attachRole");
+const requireRole = require("../middleware/requireRole");
 
 const router = express.Router();
 
@@ -41,7 +43,7 @@ router.put("/:id", (req, res) => {
 
 // DELETE /api/clients/:id  (cascades to its parts/drawings/inspections; blocked if
 // any inspection already has recorded measurements, to protect quality records)
-router.delete("/:id", (req, res) => {
+router.delete("/:id", attachRole, requireRole("qc", "admin"), (req, res) => {
   try {
     const result = db.prepare("DELETE FROM clients WHERE id = ?").run(req.params.id);
     if (result.changes === 0) return res.status(404).json({ error: "Client not found" });

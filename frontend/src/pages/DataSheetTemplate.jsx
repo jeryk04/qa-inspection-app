@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
 import { handleGridArrowNav } from "../lib/gridNav";
 import { toStoredNumber } from "../lib/numeric";
 import DecimalCell from "../components/DecimalCell";
+import { useConfirm } from "../hooks/useConfirm";
 
-const API_ORIGIN = (import.meta.env.VITE_API_URL || "http://localhost:3001/api").replace(/\/api$/, "");
+const API_ORIGIN = (import.meta.env.VITE_API_URL || `http://${window.location.hostname}:3001/api`).replace(/\/api$/, "");
 
 const EMPTY_SPEC = { balloon_number: "", max_spec: "", min_spec: "", mean_value: "", decimal_places: "3" };
 
@@ -20,7 +21,14 @@ function isPdf(path) {
 // be added, edited, or removed.
 export default function DataSheetTemplate() {
   const { partId } = useParams();
+  const [searchParams] = useSearchParams();
+  // Present only when reached from OperationDetail -- switches every drawing
+  // fetch/create below from the part's Final bucket to this operation's
+  // template bucket (see backend POST /api/drawings for the two separate
+  // version sequences this maps onto).
+  const operationId = searchParams.get("operation_id");
   const [part, setPart] = useState(null);
+  const [operation, setOperation] = useState(null);
   const [drawings, setDrawings] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
   const [drawing, setDrawing] = useState(null);
@@ -28,29 +36,41 @@ export default function DataSheetTemplate() {
   const [uploading, setUploading] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState(null);
+  const [revisionEdit, setRevisionEdit] = useState("");
+  const [savingRevision, setSavingRevision] = useState(false);
 
   const [specEdits, setSpecEdits] = useState({}); // pointId -> { balloon_number, max_spec, min_spec, mean_value }
   const [newColumns, setNewColumns] = useState([]); // [{ id: <temp negative id> }, ...] — not yet persisted
   const [saving, setSaving] = useState(false);
   const [pointMenu, setPointMenu] = useState(null); // { pointId, x, y }
   const nextTempId = useRef(0);
-  // partIds we've already attempted to auto-provision a blank drawing for —
-  // guards against React StrictMode's dev-mode double-effect-invocation
-  // racing two creates for the same part.
+  const [confirm, confirmDialog] = useConfirm();
+  // Buckets (part, or part+operation) we've already attempted to auto-provision
+  // a blank drawing for — guards against React StrictMode's dev-mode
+  // double-effect-invocation racing two creates for the same bucket. Keyed by
+  // operationId too: this page can be visited for several different
+  // operations on the same part without a full remount (same route, only the
+  // ?operation_id= query string changes), so a part-only key would wrongly
+  // block auto-provisioning for the second operation visited in one session.
   const provisionedRef = useRef(new Set());
 
   const loadList = async () => {
     try {
-      let list = await api.getDrawings(partId);
+      let list = operationId ? await api.getOperationDrawings(operationId) : await api.getDrawings(partId);
 
       // No revision at all yet — provision a blank one (no image) so the
       // Find# grid is usable immediately instead of requiring an upload first.
-      if (list.length === 0 && !provisionedRef.current.has(partId)) {
-        provisionedRef.current.add(partId);
+      const provisionKey = operationId ? `operation:${operationId}` : `part:${partId}`;
+      if (list.length === 0 && !provisionedRef.current.has(provisionKey)) {
+        provisionedRef.current.add(provisionKey);
         const formData = new FormData();
-        formData.append("part_id", partId);
+        if (operationId) {
+          formData.append("operation_id", operationId);
+        } else {
+          formData.append("part_id", partId);
+        }
         await api.uploadDrawing(formData);
-        list = await api.getDrawings(partId);
+        list = operationId ? await api.getOperationDrawings(operationId) : await api.getDrawings(partId);
       }
 
       setDrawings(list);
@@ -66,7 +86,15 @@ export default function DataSheetTemplate() {
   useEffect(() => {
     loadList();
     api.getPart(partId).then(setPart).catch((e) => setError(e.message));
-  }, [partId]);
+    if (operationId) {
+      api
+        .getOperations(partId)
+        .then((ops) => setOperation(ops.find((o) => String(o.id) === operationId) ?? null))
+        .catch((e) => setError(e.message));
+    } else {
+      setOperation(null);
+    }
+  }, [partId, operationId]);
 
   useEffect(() => {
     if (!selectedId) {
@@ -77,6 +105,7 @@ export default function DataSheetTemplate() {
       .getDrawing(selectedId)
       .then((d) => {
         setDrawing(d);
+        setRevisionEdit(d.revision_label ?? "");
         setNewColumns([]);
         const specState = {};
         d.points.forEach((p) => {
@@ -110,7 +139,11 @@ export default function DataSheetTemplate() {
     setUploading(true);
     setError(null);
     const formData = new FormData();
-    formData.append("part_id", partId);
+    if (operationId) {
+      formData.append("operation_id", operationId);
+    } else {
+      formData.append("part_id", partId);
+    }
     formData.append("image", file);
     try {
       const created = await api.uploadDrawing(formData);
@@ -125,7 +158,7 @@ export default function DataSheetTemplate() {
   };
 
   const handleDelete = async (id) => {
-    if (!window.confirm("Delete this drawing revision? This can't be undone.")) return;
+    if (!(await confirm("Delete this drawing revision? This can't be undone."))) return;
     setDeleting(true);
     setError(null);
     try {
@@ -136,6 +169,20 @@ export default function DataSheetTemplate() {
       setError(e.message);
     } finally {
       setDeleting(false);
+    }
+  };
+
+  const handleSaveRevision = async () => {
+    setSavingRevision(true);
+    setError(null);
+    try {
+      const updated = await api.updateDrawing(drawing.id, { revision_label: revisionEdit });
+      setDrawing(updated);
+      await loadList();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSavingRevision(false);
     }
   };
 
@@ -165,7 +212,7 @@ export default function DataSheetTemplate() {
       });
       return;
     }
-    if (!window.confirm("Delete this Find# column? This can't be undone.")) return;
+    if (!(await confirm("Delete this Find# column? This can't be undone."))) return;
     try {
       await api.deletePoint(pointId);
       const refreshed = await api.getDrawing(drawing.id);
@@ -228,10 +275,16 @@ export default function DataSheetTemplate() {
 
   return (
     <div className="page">
-      <Link to={`/parts/${partId}/inspections`} className="back-link">
-        ← Data Sheets
+      <Link
+        to={operationId ? `/parts/${partId}/operations/${operationId}` : `/parts/${partId}/inspections`}
+        className="back-link"
+      >
+        {operationId ? "← Operation" : "← Data Sheets"}
       </Link>
-      <h1>Data Sheet Template — {part?.part_number ?? `Part #${partId}`}</h1>
+      <h1>
+        Data Sheet Template — {part?.part_number ?? `Part #${partId}`}
+        {operationId ? ` / ${operation?.name ?? "Operation"}` : ""}
+      </h1>
       <p className="muted">
         Set up once per drawing revision. Every inspection for this part reuses these Find# columns automatically.
       </p>
@@ -248,24 +301,23 @@ export default function DataSheetTemplate() {
         </button>
       </form>
 
-      {drawings.length > 0 && (
-        <div className="version-pills">
-          {drawings.map((d) => (
-            <button
-              key={d.id}
-              type="button"
-              className={`version-pill${d.id === selectedId ? " version-pill-active" : ""}`}
-              onClick={() => setSelectedId(d.id)}
-            >
-              v{d.version}
-              {d.id === drawings[0].id && " (latest)"}
-            </button>
-          ))}
-        </div>
-      )}
-
       {drawing && (
         <>
+          <div className="inline-form">
+            <label>
+              Revision (as printed on the drawing):{" "}
+              <input
+                className="spec-input"
+                value={revisionEdit}
+                onChange={(e) => setRevisionEdit(e.target.value)}
+                placeholder="e.g. B"
+              />
+            </label>
+            <button type="button" onClick={handleSaveRevision} disabled={savingRevision}>
+              Save revision
+            </button>
+          </div>
+
           {drawing.image_path ? (
             <>
               <div className="actions-row">
@@ -314,8 +366,8 @@ export default function DataSheetTemplate() {
                       />
                     </th>
                   ))}
-                  <th className="add-column-cell" onClick={handleAddColumn} title="Add Find#">
-                    +
+                  <th className="add-column-cell" rowSpan={5} onClick={handleAddColumn} title="Add Find#">
+                    + Add Find#
                   </th>
                 </tr>
               </thead>
@@ -389,6 +441,7 @@ export default function DataSheetTemplate() {
           </li>
         </ul>
       )}
+      {confirmDialog}
     </div>
   );
 }

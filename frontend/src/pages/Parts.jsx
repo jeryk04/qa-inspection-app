@@ -1,15 +1,24 @@
-import { useEffect, useRef, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
+import { useConfirm } from "../hooks/useConfirm";
+
+const MAX_RESULTS = 30;
 
 export default function Parts() {
   const { clientId } = useParams();
+  const [searchParams] = useSearchParams();
+  // See Clients.jsx -- carries a non-default inspection type through the
+  // picker chain; absent (and thus a no-op) for the normal QC path.
+  const type = searchParams.get("type");
   const [parts, setParts] = useState([]);
+  const [query, setQuery] = useState("");
   const [partNumber, setPartNumber] = useState("");
   const [description, setDescription] = useState("");
   const [error, setError] = useState(null);
 
   const [contextMenu, setContextMenu] = useState(null); // { partId, x, y }
+  const [confirm, confirmDialog] = useConfirm();
   const [renamingId, setRenamingId] = useState(null);
   const [renameValue, setRenameValue] = useState("");
   const skipBlurSaveRef = useRef(false);
@@ -76,7 +85,7 @@ export default function Parts() {
 
   const handleDelete = async (part) => {
     setContextMenu(null);
-    if (!window.confirm(`Delete part "${part.part_number}"? This can't be undone.`)) return;
+    if (!(await confirm(`Delete part "${part.part_number}"? This can't be undone.`))) return;
     try {
       await api.deletePart(part.id);
       load();
@@ -85,12 +94,43 @@ export default function Parts() {
     }
   };
 
+  // in_process goes to the per-part Operations list instead of straight to a
+  // Data Sheet -- every other type (including the default, unset "final"
+  // case) keeps the existing single-Data-Sheet flow untouched.
+  const partHref = (id) => {
+    if (type === "in_process") return `/parts/${id}/operations`;
+    return type ? `/parts/${id}/inspections?type=${type}` : `/parts/${id}/inspections`;
+  };
+
+  const trimmedQuery = query.trim().toLowerCase();
+  const visibleParts = useMemo(() => {
+    if (!trimmedQuery) return parts;
+    return parts.filter(
+      (p) =>
+        p.part_number.toLowerCase().includes(trimmedQuery) ||
+        (p.description && p.description.toLowerCase().includes(trimmedQuery))
+    );
+  }, [parts, trimmedQuery]);
+
   return (
     <div className="page">
-      <Link to="/clients" className="back-link">
+      <Link to={type ? `/clients?type=${type}` : "/clients"} className="back-link">
         ← Customers
       </Link>
       <h1>Parts</h1>
+
+      <div className="search-bar">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <circle cx="11" cy="11" r="7" />
+          <path d="m20 20-3.5-3.5" />
+        </svg>
+        <input
+          type="search"
+          placeholder="Search part #..."
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+      </div>
 
       <form className="inline-form" onSubmit={handleSubmit}>
         <input
@@ -109,7 +149,7 @@ export default function Parts() {
       {error && <p className="error">{error}</p>}
       <p className="muted">Right-click a part to rename or delete it.</p>
       <ul className="card-list">
-        {parts.map((p) => (
+        {visibleParts.slice(0, MAX_RESULTS).map((p) => (
           <li key={p.id} className="card" onContextMenu={(e) => handleContextMenu(e, p)}>
             {renamingId === p.id ? (
               <input
@@ -129,7 +169,7 @@ export default function Parts() {
                 }}
               />
             ) : (
-              <Link to={`/parts/${p.id}/inspections`}>
+              <Link to={partHref(p.id)}>
                 <strong>{p.part_number}</strong>
                 {p.description && <span className="muted"> · {p.description}</span>}
               </Link>
@@ -137,6 +177,10 @@ export default function Parts() {
           </li>
         ))}
         {parts.length === 0 && <p className="muted">This customer has no parts yet.</p>}
+        {parts.length > 0 && visibleParts.length === 0 && <p className="muted">No parts match "{query.trim()}".</p>}
+        {visibleParts.length > MAX_RESULTS && (
+          <p className="muted">+{visibleParts.length - MAX_RESULTS} more — refine your search.</p>
+        )}
       </ul>
 
       {contextMenu && (
@@ -150,6 +194,7 @@ export default function Parts() {
           </li>
         </ul>
       )}
+      {confirmDialog}
     </div>
   );
 }

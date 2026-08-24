@@ -1,14 +1,18 @@
-import { BrowserRouter, Routes, Route, Navigate, Link, useLocation } from "react-router-dom";
+import { useState } from "react";
+import { BrowserRouter, Routes, Route, Navigate, Link, useLocation, useNavigate } from "react-router-dom";
 import { AuthProvider, useAuth } from "./context/AuthContext";
 import Home from "./pages/Home";
 import Login from "./pages/Login";
 import Clients from "./pages/Clients";
 import Parts from "./pages/Parts";
 import Inspections from "./pages/Inspections";
+import OperationsList from "./pages/OperationsList";
+import OperationDetail from "./pages/OperationDetail";
 import DataSheetTemplate from "./pages/DataSheetTemplate";
 import InspectionCapture from "./pages/InspectionCapture";
 import InspectionSheet from "./pages/InspectionSheet";
 import InspectionHistory from "./pages/InspectionHistory";
+import StatusLookup from "./pages/StatusLookup";
 import "./App.css";
 
 function RequireAuth({ children }) {
@@ -30,6 +34,17 @@ function RequireAuth({ children }) {
 
 function AppShell() {
   const { user, logout } = useAuth();
+  const navigate = useNavigate();
+  // Which role experience an admin is currently viewing -- null shows
+  // AdminMenu. Lives here (not in Home) so the header's "Switch view"
+  // control can reset it too. Not persisted: a refresh resets AppShell's
+  // state, so admin always lands back on AdminMenu.
+  const [adminView, setAdminView] = useState(null);
+
+  const switchView = () => {
+    setAdminView(null);
+    navigate("/");
+  };
 
   return (
     <>
@@ -41,6 +56,11 @@ function AppShell() {
           <nav className="main-nav">
             <Link to="/clients">Customers</Link>
             <Link to="/history">History</Link>
+            {user.role === "admin" && adminView && (
+              <button className="secondary-btn" onClick={switchView}>
+                Switch view
+              </button>
+            )}
             <span className="nav-user">{user.full_name}</span>
             <button className="secondary-btn" onClick={() => logout()}>
               Logout
@@ -55,7 +75,7 @@ function AppShell() {
             path="/"
             element={
               <RequireAuth>
-                <Home />
+                <Home adminView={adminView} setAdminView={setAdminView} />
               </RequireAuth>
             }
           />
@@ -80,6 +100,22 @@ function AppShell() {
             element={
               <RequireAuth>
                 <Inspections />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/parts/:partId/operations"
+            element={
+              <RequireAuth>
+                <OperationsList />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/parts/:partId/operations/:operationId"
+            element={
+              <RequireAuth>
+                <OperationDetail />
               </RequireAuth>
             }
           />
@@ -112,6 +148,14 @@ function AppShell() {
             element={
               <RequireAuth>
                 <InspectionHistory />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/status-lookup"
+            element={
+              <RequireAuth>
+                <StatusLookup />
               </RequireAuth>
             }
           />

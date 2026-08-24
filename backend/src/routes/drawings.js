@@ -2,6 +2,8 @@ const express = require("express");
 const multer = require("multer");
 const path = require("path");
 const db = require("../db");
+const attachRole = require("../middleware/attachRole");
+const requireRole = require("../middleware/requireRole");
 
 const router = express.Router();
 
@@ -20,12 +22,25 @@ function clampDecimalPlaces(value) {
   return Math.min(6, Math.max(0, Math.round(n)));
 }
 
-// GET /api/drawings?part_id=1
+// GET /api/drawings?part_id=1  (Final Inspection drawings for a part) or
+// GET /api/drawings?operation_id=1  (template revisions for one operation) --
+// operation_id IS NULL is what marks a row as the Final Inspection bucket
+// (see idx_final_drawing_version / idx_operation_template_version), so
+// part_id alone must exclude operation-linked rows to keep matching that.
 router.get("/", (req, res) => {
-  const { part_id } = req.query;
-  const drawings = part_id
-    ? db.prepare("SELECT * FROM balloon_drawings WHERE part_id = ? ORDER BY version DESC").all(part_id)
-    : db.prepare("SELECT * FROM balloon_drawings ORDER BY created_at DESC").all();
+  const { part_id, operation_id } = req.query;
+  let drawings;
+  if (operation_id) {
+    drawings = db
+      .prepare("SELECT * FROM balloon_drawings WHERE operation_id = ? ORDER BY version DESC")
+      .all(operation_id);
+  } else if (part_id) {
+    drawings = db
+      .prepare("SELECT * FROM balloon_drawings WHERE part_id = ? AND operation_id IS NULL ORDER BY version DESC")
+      .all(part_id);
+  } else {
+    drawings = db.prepare("SELECT * FROM balloon_drawings ORDER BY created_at DESC").all();
+  }
   res.json(drawings);
 });
 
@@ -41,37 +56,106 @@ router.get("/:id", (req, res) => {
   res.json({ ...drawing, points });
 });
 
-// POST /api/drawings  (multipart/form-data: part_id required, image optional;
-// image/PDF both accepted). A drawing revision can exist without an image —
-// e.g. so its Find# columns/specs can be set up before a drawing is ready to
-// upload. Auto-increments version to (highest existing version for this
-// part) + 1, unless explicitly provided.
+const getPriorFinalDrawing = db.prepare(
+  "SELECT * FROM balloon_drawings WHERE part_id = ? AND operation_id IS NULL ORDER BY version DESC LIMIT 1"
+);
+const getPriorOperationDrawing = db.prepare(
+  "SELECT * FROM balloon_drawings WHERE operation_id = ? ORDER BY version DESC LIMIT 1"
+);
+const insertDrawing = db.prepare(
+  "INSERT INTO balloon_drawings (part_id, image_path, version, revision_label, operation_id) VALUES (?, ?, ?, ?, ?)"
+);
+const getPointsForDrawing = db.prepare("SELECT * FROM balloon_points WHERE drawing_id = ? ORDER BY sort_order");
+const insertPoint = db.prepare(`
+  INSERT INTO balloon_points
+    (drawing_id, balloon_number, max_spec, min_spec, mean_value, sort_order, decimal_places)
+  VALUES (@drawing_id, @balloon_number, @max_spec, @min_spec, @mean_value, @sort_order, @decimal_places)
+`);
+
+// POST /api/drawings  (multipart/form-data: part_id or operation_id required,
+// image optional; image/PDF both accepted). A drawing revision can exist
+// without an image — e.g. so its Find# columns/specs can be set up before a
+// drawing is ready to upload.
+//
+// operation_id NULL vs set puts the row in one of two separate version
+// sequences (see idx_final_drawing_version / idx_operation_template_version):
+// Final Inspection drawings auto-increment per part_id, operation templates
+// auto-increment per operation_id -- the two must never share a counter.
+// When operation_id is given, its part_id is looked up server-side and used
+// instead of whatever part_id the client sent, so the two can't mismatch.
+//
+// The new revision copies forward every balloon_point from the immediately
+// prior version in the same bucket (same balloon_number/specs/sort_order/
+// decimal_places, new drawing_id) so it starts as an editable copy rather
+// than empty -- unless there is no prior version, in which case it starts
+// empty exactly as before.
 router.post("/", upload.single("image"), (req, res) => {
-  const { part_id, version } = req.body;
-  if (!part_id) {
-    return res.status(400).json({ error: "part_id is required" });
+  const { version, revision_label } = req.body;
+  let { part_id, operation_id } = req.body;
+
+  if (operation_id) {
+    const operation = db.prepare("SELECT part_id FROM operations WHERE id = ?").get(operation_id);
+    if (!operation) return res.status(404).json({ error: "Operation not found" });
+    part_id = operation.part_id;
+  } else if (!part_id) {
+    return res.status(400).json({ error: "part_id is required (or operation_id)" });
+  } else if (!db.prepare("SELECT 1 FROM parts WHERE id = ?").get(part_id)) {
+    return res.status(404).json({ error: "Part not found" });
   }
 
-  let nextVersion = version;
-  if (!nextVersion) {
-    const row = db
-      .prepare("SELECT MAX(version) AS maxVersion FROM balloon_drawings WHERE part_id = ?")
-      .get(part_id);
-    nextVersion = (row.maxVersion || 0) + 1;
-  }
+  const priorDrawing = operation_id
+    ? getPriorOperationDrawing.get(operation_id)
+    : getPriorFinalDrawing.get(part_id);
 
+  const nextVersion = version || (priorDrawing ? priorDrawing.version + 1 : 1);
   const imagePath = req.file ? `/uploads/${req.file.filename}` : null;
-  const result = db
-    .prepare("INSERT INTO balloon_drawings (part_id, image_path, version) VALUES (?, ?, ?)")
-    .run(part_id, imagePath, nextVersion);
 
-  const drawing = db.prepare("SELECT * FROM balloon_drawings WHERE id = ?").get(result.lastInsertRowid);
+  const tx = db.transaction(() => {
+    const result = insertDrawing.run(
+      part_id,
+      imagePath,
+      nextVersion,
+      revision_label?.trim() || null,
+      operation_id || null
+    );
+    const newDrawingId = result.lastInsertRowid;
+
+    if (priorDrawing) {
+      for (const p of getPointsForDrawing.all(priorDrawing.id)) {
+        insertPoint.run({
+          drawing_id: newDrawingId,
+          balloon_number: p.balloon_number,
+          max_spec: p.max_spec,
+          min_spec: p.min_spec,
+          mean_value: p.mean_value,
+          sort_order: p.sort_order,
+          decimal_places: p.decimal_places,
+        });
+      }
+    }
+
+    return newDrawingId;
+  });
+
+  const drawing = db.prepare("SELECT * FROM balloon_drawings WHERE id = ?").get(tx());
   res.status(201).json(drawing);
+});
+
+// PUT /api/drawings/:id  (edit the free-text revision label printed on the
+// drawing's title block -- independent from the auto-incrementing version
+// number used for "latest" ordering)
+router.put("/:id", (req, res) => {
+  const { revision_label } = req.body;
+  const result = db
+    .prepare("UPDATE balloon_drawings SET revision_label = ? WHERE id = ?")
+    .run(revision_label?.trim() || null, req.params.id);
+  if (result.changes === 0) return res.status(404).json({ error: "Drawing not found" });
+  res.json(db.prepare("SELECT * FROM balloon_drawings WHERE id = ?").get(req.params.id));
 });
 
 // DELETE /api/drawings/:id  (cascades to its balloon_points; blocked if any point
 // already has recorded measurements, to protect quality records from deletion)
-router.delete("/:id", (req, res) => {
+router.delete("/:id", attachRole, requireRole("qc", "admin"), (req, res) => {
   try {
     const result = db.prepare("DELETE FROM balloon_drawings WHERE id = ?").run(req.params.id);
     if (result.changes === 0) return res.status(404).json({ error: "Drawing not found" });
@@ -143,7 +227,7 @@ router.put("/points/:id", (req, res) => {
 });
 
 // DELETE /api/drawings/points/:id  (blocked if measurements already reference it)
-router.delete("/points/:id", (req, res) => {
+router.delete("/points/:id", attachRole, requireRole("qc", "admin"), (req, res) => {
   try {
     const result = db.prepare("DELETE FROM balloon_points WHERE id = ?").run(req.params.id);
     if (result.changes === 0) return res.status(404).json({ error: "Point not found" });

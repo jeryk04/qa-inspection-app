@@ -23,7 +23,7 @@ router.post("/login", (req, res) => {
 
   const token = signToken(user);
   res.cookie(COOKIE_NAME, token, COOKIE_OPTIONS);
-  res.json({ id: user.id, username: user.username, full_name: user.full_name });
+  res.json({ id: user.id, username: user.username, full_name: user.full_name, role: user.role });
 });
 
 // POST /api/auth/logout
@@ -39,7 +39,11 @@ router.get("/me", (req, res) => {
 
   try {
     const payload = verifyToken(token);
-    res.json({ id: payload.sub, username: payload.username, full_name: payload.full_name });
+    // role isn't in the JWT (it's not embedded at login, see attachRole.js for
+    // why) -- look it up fresh so a role change is reflected without re-login.
+    const user = db.prepare("SELECT id, username, full_name, role FROM users WHERE id = ?").get(payload.sub);
+    if (!user) return res.status(401).json({ error: "Not authenticated" });
+    res.json(user);
   } catch {
     res.status(401).json({ error: "Not authenticated" });
   }

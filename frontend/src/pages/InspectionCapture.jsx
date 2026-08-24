@@ -3,9 +3,11 @@ import { Link, useParams } from "react-router-dom";
 import { api } from "../api/client";
 import { useAuth } from "../context/AuthContext";
 import { toStoredNumber } from "../lib/numeric";
+import { resultLabel } from "../lib/format";
 import DecimalCell from "../components/DecimalCell";
+import { useConfirm } from "../hooks/useConfirm";
 
-const BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:3001/api";
+const BASE_URL = import.meta.env.VITE_API_URL || `http://${window.location.hostname}:3001/api`;
 const AUTOSAVE_DELAY_MS = 900;
 
 // Only the header fields Final Inspection actually uses. Heat/Supplier/PO#/
@@ -19,7 +21,6 @@ const HEADER_FIELDS = [
   ["date", "Date"],
   ["sampling_plan_n", "Sampling Plan  n="],
   ["sampling_plan_c", "c="],
-  ["lot_disposition", "Lot Disposition"],
   ["inspector", "By (Inspector)"],
 ];
 
@@ -77,13 +78,19 @@ export default function InspectionCapture() {
   const [headerStatus, setHeaderStatus] = useState("saved");
   const [notesStatus, setNotesStatus] = useState("saved");
   const [measurementsStatus, setMeasurementsStatus] = useState("saved");
-  const [signingAction, setSigningAction] = useState(null); // null | "approved" | "rejected"
+  const [signingAction, setSigningAction] = useState(null); // null | "approved" | "conditionally_approved" | "rejected"
   const [signerName, setSignerName] = useState("");
+  const [signingReason, setSigningReason] = useState("");
   const [signing, setSigning] = useState(false);
   const [sampleMenu, setSampleMenu] = useState(null); // { sampleNumber, x, y }
+  const [confirm, confirmDialog] = useConfirm();
 
   const isLocked = inspection ? inspection.status !== "in_progress" : false;
   const hasTemplate = drawing ? drawing.points.length > 0 : false;
+  // Matches the server-side requireRole("qc", "admin") guard on PUT
+  // /:id/status -- hidden here too so an operator doesn't go through the
+  // whole "type your name to sign" flow only to hit a 403 at the end.
+  const canSign = ["qc", "admin"].includes(user?.role);
 
   // Snapshots of what's actually been saved, so the beforeunload guard below
   // (and the autosave effects) can tell "typed but not saved" apart from
@@ -183,7 +190,12 @@ export default function InspectionCapture() {
       samples.forEach((s) => {
         const raw = values[cellKey(p.id, s)];
         if (raw !== "" && raw !== undefined) {
-          measurements.push({ balloon_point_id: p.id, sample_number: s, measured_value: toStoredNumber(raw) });
+          // Points with no Max/Min spec (e.g. a Fixture check) have nothing
+          // numeric to compare against, so a non-numeric entry like "OK" is
+          // saved as free text rather than discarded as null.
+          const num = toStoredNumber(raw);
+          const measured_value = num == null ? String(raw).trim() : num;
+          measurements.push({ balloon_point_id: p.id, sample_number: s, measured_value });
         }
       });
     });
@@ -311,7 +323,7 @@ export default function InspectionCapture() {
 
   const handleDeleteSample = async (sampleNumber) => {
     setSampleMenu(null);
-    if (!window.confirm("Are you sure you want to delete this row?")) return;
+    if (!(await confirm("Are you sure you want to delete this row?"))) return;
     try {
       await api.deleteSample(inspectionId, sampleNumber);
       // Remove just this row locally — do NOT re-derive samples/values from
@@ -370,20 +382,23 @@ export default function InspectionCapture() {
     }
     setSigningAction(action);
     setSignerName(user?.full_name ?? "");
+    setSigningReason("");
   };
 
   const cancelSigning = () => {
     setSigningAction(null);
     setSignerName("");
+    setSigningReason("");
   };
 
   const confirmSigning = async () => {
     setSigning(true);
     setError(null);
     try {
-      await api.setStatus(inspectionId, signingAction, signerName);
+      await api.setStatus(inspectionId, signingAction, signerName, signingReason);
       setSigningAction(null);
       setSignerName("");
+      setSigningReason("");
       load();
     } catch (e) {
       setError(e.message);
@@ -392,10 +407,17 @@ export default function InspectionCapture() {
     }
   };
 
+  if (error && !inspection) {
+    return (
+      <div className="page">
+        <p className="error">{error}</p>
+      </div>
+    );
+  }
+
   if (!inspection || !drawing) {
     return (
       <div className="page">
-        {error && <p className="error">{error}</p>}
         <p>Loading...</p>
       </div>
     );
@@ -407,8 +429,15 @@ export default function InspectionCapture() {
 
   return (
     <div className="page">
-      <Link to={`/parts/${inspection.part_id}/inspections`} className="back-link">
-        ← Data Sheets
+      <Link
+        to={
+          inspection.operation_id
+            ? `/parts/${inspection.part_id}/operations/${inspection.operation_id}`
+            : `/parts/${inspection.part_id}/inspections`
+        }
+        className="back-link"
+      >
+        {inspection.operation_id ? "← Operation" : "← Data Sheets"}
       </Link>
       <h1>Data Sheet — {inspection.part_number}</h1>
 
@@ -454,7 +483,16 @@ export default function InspectionCapture() {
       {!hasTemplate ? (
         <p className="sign-panel">
           This part doesn't have a Data Sheet Template yet — there are no Find# columns to measure.{" "}
-          <Link to={`/parts/${inspection.part_id}/template`}>Set up the Data Sheet Template</Link> first.
+          <Link
+            to={
+              inspection.operation_id
+                ? `/parts/${inspection.part_id}/template?operation_id=${inspection.operation_id}`
+                : `/parts/${inspection.part_id}/template`
+            }
+          >
+            Set up the Data Sheet Template
+          </Link>{" "}
+          first.
         </p>
       ) : (
         <>
@@ -549,10 +587,13 @@ export default function InspectionCapture() {
       )}
 
       <div className="actions-row">
-        {!isLocked && (
+        {!isLocked && canSign && (
           <>
             <button onClick={() => startSigning("approved")} className="approve">
               Approve
+            </button>
+            <button onClick={() => startSigning("conditionally_approved")} className="conditional">
+              Conditionally Approve
             </button>
             <button onClick={() => startSigning("rejected")} className="reject">
               Reject
@@ -570,12 +611,25 @@ export default function InspectionCapture() {
       {signingAction && (
         <div className="sign-panel">
           <p>
-            Signing as <strong>{user?.full_name}</strong> to <strong>{signingAction}</strong> this inspection.
-            Type your full name to confirm:
+            Signing as <strong>{user?.full_name}</strong> to <strong>{resultLabel(signingAction)}</strong> this
+            inspection. Type your full name to confirm:
           </p>
+          {signingAction === "conditionally_approved" && (
+            <textarea
+              className="notes-textarea"
+              value={signingReason}
+              onChange={(e) => setSigningReason(e.target.value)}
+              placeholder="Reason for conditional approval (required)"
+              rows={2}
+            />
+          )}
           <div className="actions-row">
             <input value={signerName} onChange={(e) => setSignerName(e.target.value)} placeholder="Full name" />
-            <button onClick={confirmSigning} disabled={signing} className="approve">
+            <button
+              onClick={confirmSigning}
+              disabled={signing || (signingAction === "conditionally_approved" && !signingReason.trim())}
+              className="approve"
+            >
               Confirm &amp; Sign
             </button>
             <button onClick={cancelSigning} className="secondary-btn">
@@ -603,6 +657,7 @@ export default function InspectionCapture() {
           </li>
         </ul>
       )}
+      {confirmDialog}
     </div>
   );
 }
