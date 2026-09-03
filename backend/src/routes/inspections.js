@@ -1,7 +1,7 @@
 const express = require("express");
 const db = require("../db");
 const { generateInspectionPdf } = require("../pdf/inspectionSheet");
-const { recordAudit, recordHeaderAudit, recordMeasurementsAudit } = require("../lib/audit");
+const { recordAudit, recordHeaderAudit, recordMeasurementsAudit, recordPointSummariesAudit } = require("../lib/audit");
 const { signInspectionStatus } = require("../lib/inspectionSigning");
 const { parsePassFailState } = require("../lib/passfail");
 const attachRole = require("../middleware/attachRole");
@@ -778,6 +778,11 @@ router.put("/:id/point-summaries", attachRole, (req, res) => {
   const { summaries } = req.body;
   if (!Array.isArray(summaries)) return res.status(400).json({ error: "summaries must be an array" });
 
+  const getExistingSummary = db.prepare(
+    "SELECT qty_inspected, qty_rejected, reject_notes FROM inspection_point_summaries WHERE inspection_id = ? AND balloon_point_id = ?"
+  );
+  const getPoint = db.prepare("SELECT balloon_number FROM balloon_points WHERE id = ?");
+
   const upsert = db.prepare(`
     INSERT INTO inspection_point_summaries (inspection_id, balloon_point_id, qty_inspected, qty_rejected, reject_notes)
     VALUES (@inspection_id, @balloon_point_id, @qty_inspected, @qty_rejected, @reject_notes)
@@ -786,22 +791,45 @@ router.put("/:id/point-summaries", attachRole, (req, res) => {
       reject_notes = excluded.reject_notes
   `);
 
+  // Diffed the same way as measurements below -- autosave fires this on every
+  // ~900ms debounce, so without a real before/after diff (and the coalescing
+  // recorder), History fills up with a near-duplicate row per keystroke burst.
+  const changes = [];
+
   const tx = db.transaction((items) => {
     for (const item of items) {
+      const qty_inspected = Number(item.qty_inspected) || 0;
+      const qty_rejected = Number(item.qty_rejected) || 0;
+      const reject_notes = item.reject_notes || null;
+
+      const existing = getExistingSummary.get(req.params.id, item.balloon_point_id);
+      if (
+        !existing ||
+        existing.qty_inspected !== qty_inspected ||
+        existing.qty_rejected !== qty_rejected ||
+        existing.reject_notes !== reject_notes
+      ) {
+        changes.push({
+          balloon_number: getPoint.get(item.balloon_point_id)?.balloon_number,
+          old: existing ?? null,
+          new: { qty_inspected, qty_rejected, reject_notes },
+        });
+      }
+
       upsert.run({
         inspection_id: req.params.id,
         balloon_point_id: item.balloon_point_id,
-        qty_inspected: Number(item.qty_inspected) || 0,
-        qty_rejected: Number(item.qty_rejected) || 0,
-        reject_notes: item.reject_notes || null,
+        qty_inspected,
+        qty_rejected,
+        reject_notes,
       });
     }
   });
   tx(summaries);
 
-  recordAudit("inspection", req.params.id, "point_summaries_saved", req.user.id, {
-    points: summaries.map((s) => s.balloon_point_id),
-  });
+  if (changes.length > 0) {
+    recordPointSummariesAudit("inspection", req.params.id, req.user.id, changes);
+  }
 
   const updated = db
     .prepare(

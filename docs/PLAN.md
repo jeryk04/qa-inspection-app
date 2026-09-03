@@ -63,6 +63,8 @@ built in Phase 1 (same data model and capture flow).
 - Trend analysis and historical quality control module.
 - Out-of-tolerance alerts.
 - Evaluate MIE Trak Pro integration to sync client/part data.
+- AI platform (chat assistant, anomaly detection, computer vision) —
+  see `docs/AI_PLATFORM_PLAN.md` for the detailed plan. Not started.
 
 ## 5. Data Model
 

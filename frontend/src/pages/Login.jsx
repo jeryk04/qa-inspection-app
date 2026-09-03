@@ -37,7 +37,7 @@ export default function Login() {
           <input value={username} onChange={(e) => setUsername(e.target.value)} autoFocus />
         </label>
         <label>
-          <span className="muted">Password</span>
+          <span className="muted">Password (Operators: leave blank)</span>
           <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
         </label>
         {error && <p className="error">{error}</p>}

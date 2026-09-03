@@ -6,15 +6,18 @@ import { useCallback, useRef, useState } from "react";
 // immediately without ever showing a dialog, so any deletion gated on
 // `if (!window.confirm(...)) return;` just silently no-ops with no error.
 // Usage: const [confirm, confirmDialog] = useConfirm(); ... await confirm("...")
-// and render {confirmDialog} once somewhere in the component's JSX.
+// and render {confirmDialog} once somewhere in the component's JSX. Defaults
+// match this hook's original, only use (a red "Delete" button) -- pass
+// options for any other kind of yes/no prompt, e.g. the "unsaved changes"
+// leave-guard in InspectionCapture.jsx, which isn't destructive.
 export function useConfirm() {
-  const [prompt, setPrompt] = useState(null); // { message }
+  const [prompt, setPrompt] = useState(null); // { message, confirmLabel, danger }
   const resolveRef = useRef(null);
 
-  const confirm = useCallback((message) => {
+  const confirm = useCallback((message, { confirmLabel = "Delete", danger = true } = {}) => {
     return new Promise((resolve) => {
       resolveRef.current = resolve;
-      setPrompt({ message });
+      setPrompt({ message, confirmLabel, danger });
     });
   }, []);
 
@@ -32,8 +35,8 @@ export function useConfirm() {
           <button type="button" className="secondary-btn" onClick={() => settle(false)}>
             Cancel
           </button>
-          <button type="button" className="reject" onClick={() => settle(true)} autoFocus>
-            Delete
+          <button type="button" className={prompt.danger ? "reject" : ""} onClick={() => settle(true)} autoFocus>
+            {prompt.confirmLabel}
           </button>
         </div>
       </div>

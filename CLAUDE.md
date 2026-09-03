@@ -9,10 +9,13 @@ client and part number.
 
 ## Current status / priority
 Phase 2 (Inspection Expansion) is done — all 4 inspection types (Final,
-Set-up, In-Process, Incoming) have working UI flows, and as of 2026-09-03
-the app is live for real production inspections across every department
-(operators, QC, engineers). Incoming Inspection doesn't get its own new
-UI shape — it reuses the same per-part Parts → InspectionCapture flow as
+Set-up, In-Process, Incoming) have working UI flows. **Not yet live in
+real production** — as of 2026-09-04 the app is still in testing (the
+2026-09-03 dev session prepped it for go-live — test-data cleanup,
+forced password change, etc. — but the user hasn't actually started real
+inspections yet, and is now working on deploying it to the company's
+Ubuntu server first). Incoming Inspection doesn't get its own new UI
+shape — it reuses the same per-part Parts → InspectionCapture flow as
 Final, just entered through a different picker (`Home.jsx`'s "Incoming
 Inspection" card → `/incoming`) that organizes clients into 3 categories
 (Material/Subcomponent/Subcontractor) matching the real source folders on
@@ -20,11 +23,15 @@ disk, instead of the normal customer list. See `frontend/src/lib/
 incoming.js` for the folder-to-category mapping and `IncomingInspection.jsx`
 / `IncomingFolders.jsx` for the picker UI.
 
-Next up: keep the app stable for real use; once enough real inspection
-data has accumulated, resume the Engineer Dashboard analytics work
-(per-part Xbar-style batch charts, Cpk, control limits — see `frontend/
-src/components/charts/RunChart.jsx` — are built but were only exercised
-against seeded demo data so far).
+Next up: deploy to the company's Ubuntu server (in progress — see
+whatever deployment docs/scripts exist by the time you're reading this).
+After that, keep the app stable for real use; once enough real
+inspection data has accumulated, resume the Engineer Dashboard analytics
+work (per-part Xbar-style batch charts, Cpk, control limits — see
+`frontend/src/components/charts/RunChart.jsx` — are built but were only
+exercised against seeded demo data so far). A separate AI platform plan
+(chat assistant, anomaly detection, computer vision) is parked for later
+— see `docs/AI_PLATFORM_PLAN.md`, not started.
 
 Final Inspection is one Data Sheet per part (the part's default,
 `operation_id IS NULL` drawing bucket). In-Process and Set-up Inspection
@@ -67,7 +74,17 @@ single value per point.
   (deactivate, don't hard-delete, once a user has real audit history),
   `must_change_password` (forces a one-time password-change prompt on next
   login — set on every admin-created/reset password, see `backend/src/
-  routes/auth.js`'s `PUT /password` and `App.jsx`'s `RequireAuth`)
+  routes/auth.js`'s `PUT /password` and `App.jsx`'s `RequireAuth`).
+  **Operators sign in with just their numeric username, no password at
+  all** (`POST /api/auth/login` skips the password check entirely when
+  the matched account's role is `'operator'` — a deliberate shop-floor
+  tap-in tradeoff; every other role still requires one, since QC/Engineer/
+  Admin can approve/reject, delete records, or manage users).
+  `must_change_password` is always reported `false` for Operators
+  regardless of the stored value, since password management doesn't apply
+  to a role that doesn't use one — the real stored value resurfaces (and
+  the forced-change gate applies again) the moment an account is promoted
+  to a role that does.
 - `clients` — the company's clients
 - `parts` — parts, each associated with a client
 - `balloon_drawings` — the technical drawing image for a part

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { api } from "../api/client";
 import { useAuth } from "../context/AuthContext";
 import { toStoredNumber } from "../lib/numeric";
@@ -114,6 +114,7 @@ function statusLabel(state) {
 // refresh once a save round-trip has completed.
 export default function InspectionCapture() {
   const { inspectionId } = useParams();
+  const navigate = useNavigate();
   const { user } = useAuth();
   const [inspection, setInspection] = useState(null);
   const [drawing, setDrawing] = useState(null);
@@ -441,24 +442,52 @@ export default function InspectionCapture() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pointSummaries, isLocked, inspection, isHundredPercent]);
 
-  // Warn before closing/refreshing the tab if something is mid-autosave —
-  // the debounce delay leaves a brief window where the very latest
-  // keystroke hasn't reached the server yet.
+  // True while something typed hasn't reached the server yet -- the ~1s
+  // autosave debounce (AUTOSAVE_DELAY_MS) leaves a brief window where the
+  // very latest keystroke is still pending. Shared by the beforeunload guard
+  // below (tab close/refresh) and guardedNavigate (in-app link clicks) --
+  // React Router doesn't unload the page for the latter, so beforeunload
+  // never fires for it, and a plain unmount would silently cancel the
+  // pending debounced save (its setTimeout gets cleared on cleanup) with no
+  // warning at all.
+  const isDirty = () =>
+    JSON.stringify(header) !== savedHeaderRef.current ||
+    notes !== savedNotesRef.current ||
+    JSON.stringify(values) !== savedValuesRef.current ||
+    JSON.stringify(pointSummaries) !== savedSummariesRef.current;
+
   useEffect(() => {
     const handleBeforeUnload = (e) => {
-      const dirty =
-        JSON.stringify(header) !== savedHeaderRef.current ||
-        notes !== savedNotesRef.current ||
-        JSON.stringify(values) !== savedValuesRef.current ||
-        JSON.stringify(pointSummaries) !== savedSummariesRef.current;
-      if (dirty) {
+      if (isDirty()) {
         e.preventDefault();
         e.returnValue = "";
       }
     };
     window.addEventListener("beforeunload", handleBeforeUnload);
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [header, notes, values, pointSummaries]);
+
+  // Guards the in-app "leave this Data Sheet" links (back link, View/Print)
+  // -- if isDirty(), ask before navigating away instead of silently
+  // discarding whatever hasn't autosaved yet.
+  const guardedNavigate = async (e, to) => {
+    e.preventDefault();
+    if (isDirty()) {
+      const shouldSave = await confirm("You have unsaved changes on this Data Sheet. Save before leaving?", {
+        confirmLabel: "Save & Leave",
+        danger: false,
+      });
+      if (!shouldSave) return;
+      try {
+        await flushPendingSaves();
+      } catch (e2) {
+        setError(e2.message);
+        return;
+      }
+    }
+    navigate(to);
+  };
 
   useEffect(() => {
     if (!sampleMenu) return;
@@ -706,16 +735,13 @@ export default function InspectionCapture() {
     inspection.measurements.map((m) => [cellKey(m.balloon_point_id, m.sample_number), m])
   );
 
+  const backTo = inspection.operation_id
+    ? `/parts/${inspection.part_id}/operations/${inspection.operation_id}?type=${inspection.type}`
+    : `/parts/${inspection.part_id}/inspections${inspection.type !== "final" ? `?type=${inspection.type}` : ""}`;
+
   return (
     <div className="page">
-      <Link
-        to={
-          inspection.operation_id
-            ? `/parts/${inspection.part_id}/operations/${inspection.operation_id}?type=${inspection.type}`
-            : `/parts/${inspection.part_id}/inspections${inspection.type !== "final" ? `?type=${inspection.type}` : ""}`
-        }
-        className="back-link"
-      >
+      <Link to={backTo} className="back-link" onClick={(e) => guardedNavigate(e, backTo)}>
         {inspection.operation_id ? "← Operation" : "← Data Sheets"}
       </Link>
       <div className="sheet-title-row">
@@ -724,7 +750,11 @@ export default function InspectionCapture() {
           <span className={`status status-${resultStatus(inspection)}`}>{resultLabel(resultStatus(inspection))}</span>
         </div>
         <div className="sheet-toolbar">
-          <Link to={`/inspections/${inspectionId}/sheet`} className="toolbar-btn">
+          <Link
+            to={`/inspections/${inspectionId}/sheet`}
+            className="toolbar-btn"
+            onClick={(e) => guardedNavigate(e, `/inspections/${inspectionId}/sheet`)}
+          >
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
               <circle cx="12" cy="12" r="3" />
               <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" />

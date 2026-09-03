@@ -79,4 +79,26 @@ function recordMeasurementsAudit(entityType, entityId, userId, changes) {
   touch.run(JSON.stringify({ changes: merged }), recent.id);
 }
 
-module.exports = { recordAudit, recordHeaderAudit, recordMeasurementsAudit };
+// changes: [{ balloon_number, old, new }, ...] -- merged by balloon_number the
+// same way as recordMeasurementsAudit, keeping each point's original `old`
+// from the first save in the burst and only updating `new`.
+function recordPointSummariesAudit(entityType, entityId, userId, changes) {
+  const recent = findRecent.get(entityType, entityId, "point_summaries_saved", userId ?? null, `-${COALESCE_WINDOW_MINUTES} minutes`);
+  if (!recent) {
+    recordAudit(entityType, entityId, "point_summaries_saved", userId, { changes });
+    return;
+  }
+  const previous = recent.details ? JSON.parse(recent.details).changes || [] : [];
+  const merged = [...previous];
+  changes.forEach((change) => {
+    const idx = merged.findIndex((c) => c.balloon_number === change.balloon_number);
+    if (idx >= 0) {
+      merged[idx] = { ...merged[idx], new: change.new };
+    } else {
+      merged.push(change);
+    }
+  });
+  touch.run(JSON.stringify({ changes: merged }), recent.id);
+}
+
+module.exports = { recordAudit, recordHeaderAudit, recordMeasurementsAudit, recordPointSummariesAudit };

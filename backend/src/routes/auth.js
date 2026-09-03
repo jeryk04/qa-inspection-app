@@ -14,11 +14,20 @@ const COOKIE_OPTIONS = {
 // POST /api/auth/login  { username, password }
 router.post("/login", (req, res) => {
   const { username, password } = req.body;
-  if (!username || !password) return res.status(400).json({ error: "username and password are required" });
+  if (!username) return res.status(400).json({ error: "username is required" });
 
   const user = db.prepare("SELECT * FROM users WHERE username = ? AND active = 1").get(username);
-  if (!user || !bcrypt.compareSync(password, user.password_hash)) {
-    return res.status(401).json({ error: "Invalid username or password" });
+  if (!user) return res.status(401).json({ error: "Invalid username or password" });
+
+  // Operators sign in with just their numeric employee code -- a quick
+  // tap-in at a shared shop-floor tablet, no password at all. Every other
+  // role still needs a real password: QC/Engineer/Admin can approve or
+  // reject Data Sheets, delete records, or manage other users, so those
+  // stay behind a real credential.
+  if (user.role !== "operator") {
+    if (!password || !bcrypt.compareSync(password, user.password_hash)) {
+      return res.status(401).json({ error: "Invalid username or password" });
+    }
   }
 
   const token = signToken(user);
@@ -28,7 +37,11 @@ router.post("/login", (req, res) => {
     username: user.username,
     full_name: user.full_name,
     role: user.role,
-    must_change_password: !!user.must_change_password,
+    // Password management is moot for a role that doesn't use a password to
+    // sign in -- never force an Operator through the change-password gate,
+    // regardless of their stored flag (it stays as-is in the DB in case
+    // they're later promoted to a role that does need a real password).
+    must_change_password: user.role === "operator" ? false : !!user.must_change_password,
   });
 });
 
@@ -51,7 +64,7 @@ router.get("/me", (req, res) => {
       .prepare("SELECT id, username, full_name, role, must_change_password FROM users WHERE id = ?")
       .get(payload.sub);
     if (!user) return res.status(401).json({ error: "Not authenticated" });
-    res.json({ ...user, must_change_password: !!user.must_change_password });
+    res.json({ ...user, must_change_password: user.role === "operator" ? false : !!user.must_change_password });
   } catch {
     res.status(401).json({ error: "Not authenticated" });
   }
