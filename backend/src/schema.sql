@@ -2,13 +2,14 @@
 -- See docs/PLAN.md section 5 for the original data model.
 
 CREATE TABLE IF NOT EXISTS users (
-  id              INTEGER PRIMARY KEY AUTOINCREMENT,
-  username        TEXT NOT NULL UNIQUE,
-  password_hash   TEXT NOT NULL,
-  full_name       TEXT NOT NULL,
-  role            TEXT NOT NULL DEFAULT 'qc' CHECK (role IN ('operator','engineer','qc','admin')),
-  active          INTEGER NOT NULL DEFAULT 1,
-  created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+  id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+  username              TEXT NOT NULL UNIQUE,
+  password_hash         TEXT NOT NULL,
+  full_name             TEXT NOT NULL,
+  role                  TEXT NOT NULL DEFAULT 'qc' CHECK (role IN ('operator','engineer','qc','admin')),
+  active                INTEGER NOT NULL DEFAULT 1,
+  must_change_password  INTEGER NOT NULL DEFAULT 0,
+  created_at            TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS clients (
@@ -28,13 +29,27 @@ CREATE TABLE IF NOT EXISTS parts (
 
 -- Free-text operation names scoped per part (e.g. "Bending", "Chamfer",
 -- "Groove") -- the datasheet-template equivalent of balloon_number: whatever
--- the shop calls this step on this part, not a fixed enum.
+-- the shop calls this step on this part, not a fixed enum. scope keeps
+-- three completely independent operation lists + Data Sheet Templates for
+-- the same part -- QC's Set-up, the Operator's own In-Process work, and
+-- QC's own separate In-Process work (QC has its own "In-Process Inspection"
+-- entry point on Home.jsx too, e.g. to cover for an absent operator, but
+-- that must never share the Operator's list). All three may track the same
+-- real physical step (e.g. all three could have a "Bending"), but as
+-- separate operation rows that share nothing -- not specs, not drawings,
+-- not history (only the customer/part number has to match across them).
+-- Note this is independent of inspections.type, which stays a plain
+-- 'setup'/'in_process' paper-form category regardless of which of the two
+-- in_process_* scopes created it. UNIQUE is per (part_id, scope, name), not
+-- just (part_id, name), so every side can freely reuse the same name (e.g.
+-- "Bending") without colliding with either of the other two.
 CREATE TABLE IF NOT EXISTS operations (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   part_id     INTEGER NOT NULL REFERENCES parts(id) ON DELETE CASCADE,
   name        TEXT NOT NULL,
+  scope       TEXT NOT NULL DEFAULT 'setup' CHECK (scope IN ('setup', 'in_process_operator', 'in_process_qc')),
   created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-  UNIQUE(part_id, name)
+  UNIQUE(part_id, scope, name)
 );
 
 -- image_path is nullable: a drawing revision can exist purely to hold Find#
@@ -54,6 +69,7 @@ CREATE TABLE IF NOT EXISTS balloon_drawings (
   version       INTEGER NOT NULL DEFAULT 1,
   revision_label TEXT,
   operation_id  INTEGER REFERENCES operations(id),
+  hundred_percent_inspection INTEGER NOT NULL DEFAULT 0, -- 0/1; set once at template setup, copied onto every new inspection created against this drawing (see POST /api/inspections)
   created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -102,6 +118,8 @@ CREATE TABLE IF NOT EXISTS inspections (
   sampling_plan_c     INTEGER,
   lot_disposition     TEXT, -- legacy free-text field, superseded by conditional_reason below; kept for old records
   conditional_reason  TEXT, -- required reason text when signed as Conditionally Approved (status stays 'approved')
+  requires_in_process INTEGER NOT NULL DEFAULT 0, -- 0/1; Final Inspection only -- see hasQualifyingInProcess in routes/inspections.js
+  hundred_percent_inspection INTEGER NOT NULL DEFAULT 0, -- 0/1; In-Process only -- switches specless columns to inspection_point_summaries instead of one measurements row per sample
   created_by          INTEGER REFERENCES users(id),
   updated_by          INTEGER REFERENCES users(id)
 );
@@ -116,6 +134,22 @@ CREATE TABLE IF NOT EXISTS measurements (
   measured_value    REAL,
   within_tolerance  INTEGER, -- 0/1, computed on save
   UNIQUE(inspection_id, balloon_point_id, sample_number)
+);
+
+-- A 100%-inspection tally for one Find# column (hundred_percent_inspection=1
+-- on the inspection) -- one row per point instead of one measurements row per
+-- sample, for a check where every piece in a large lot was inspected and
+-- individual per-piece readings aren't the point (e.g. a Fixture/Visual
+-- check on 112 pieces). Only ever used for specless (OK/Not-OK) columns; a
+-- numeric spec column always keeps its real per-sample measurements rows.
+CREATE TABLE IF NOT EXISTS inspection_point_summaries (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  inspection_id     INTEGER NOT NULL REFERENCES inspections(id) ON DELETE CASCADE,
+  balloon_point_id  INTEGER NOT NULL REFERENCES balloon_points(id),
+  qty_inspected     INTEGER NOT NULL DEFAULT 0,
+  qty_rejected      INTEGER NOT NULL DEFAULT 0,
+  reject_notes      TEXT,
+  UNIQUE(inspection_id, balloon_point_id)
 );
 
 -- One row per meaningful action on a record (created / header_updated /
@@ -141,12 +175,59 @@ CREATE TABLE IF NOT EXISTS signatures (
   signed_at       TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Admin recycle bin. A row captures everything needed to fully restore
+-- something an admin-triggered cascade delete removed (see
+-- backend/src/lib/trash.js) -- entity_type is only 'operation' today
+-- (deleting an Operation now cascades its Data Sheet Template and
+-- inspection history instead of being blocked), but the shape is generic
+-- so another entity type can reuse it later without a redesign.
+-- restored_at stays NULL while the item is still recoverable; once
+-- restored (or purged) it's kept for its own record of who did what.
+CREATE TABLE IF NOT EXISTS deleted_items (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  entity_type   TEXT NOT NULL,
+  entity_id     INTEGER NOT NULL,
+  label         TEXT NOT NULL,
+  snapshot      TEXT NOT NULL,
+  deleted_by    INTEGER REFERENCES users(id),
+  deleted_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  restored_by   INTEGER REFERENCES users(id),
+  restored_at   TEXT
+);
+
+-- Which customers a user is assigned to, for admin bookkeeping only --
+-- purely informational (shown on the user's profile), not enforced as an
+-- access restriction anywhere else in the app.
+CREATE TABLE IF NOT EXISTS user_clients (
+  user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  client_id   INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+  PRIMARY KEY (user_id, client_id)
+);
+
+-- An engineer manually acknowledging one Needs Attention alert (Engineer
+-- Dashboard, see GET /inspections/analytics's needsAttention). Keyed by the
+-- specific measurement row, not the balloon_point_id -- so a dismissal
+-- naturally expires the moment a NEWER measurement is recorded on that
+-- same point (pass or fail): the dashboard is by then looking at a
+-- different measurement_id, so the old dismissal simply stops applying
+-- rather than needing to be cleared by hand. Combined with needsAttention
+-- itself only ever considering each point's latest reading, this is the
+-- other half of "don't just keep growing": a point that gets re-measured
+-- and passes drops off on its own; one that's still failing but has
+-- already been reviewed can be dismissed until something actually changes.
+CREATE TABLE IF NOT EXISTS dismissed_alerts (
+  measurement_id  INTEGER PRIMARY KEY REFERENCES measurements(id) ON DELETE CASCADE,
+  dismissed_by    INTEGER REFERENCES users(id),
+  dismissed_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_parts_client ON parts(client_id);
 CREATE INDEX IF NOT EXISTS idx_operations_part ON operations(part_id);
 CREATE INDEX IF NOT EXISTS idx_inspections_part ON inspections(part_id);
 CREATE INDEX IF NOT EXISTS idx_measurements_inspection ON measurements(inspection_id);
 CREATE INDEX IF NOT EXISTS idx_audit_log_entity ON audit_log(entity_type, entity_id);
 CREATE INDEX IF NOT EXISTS idx_signatures_inspection ON signatures(inspection_id);
+CREATE INDEX IF NOT EXISTS idx_deleted_items_active ON deleted_items(entity_type, restored_at);
 
 -- A status can only flip to approved/rejected once a matching signature row
 -- already exists -- i.e. the signature must be inserted first, in the same

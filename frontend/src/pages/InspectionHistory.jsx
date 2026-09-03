@@ -15,6 +15,7 @@ export default function InspectionHistory() {
   const [status, setStatus] = useState("");
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
+  const [jobNumber, setJobNumber] = useState("");
 
   useEffect(() => {
     api.getClients().then(setClients).catch((e) => setError(e.message));
@@ -38,6 +39,7 @@ export default function InspectionHistory() {
     if (status) params.status = status;
     if (dateFrom) params.date_from = dateFrom;
     if (dateTo) params.date_to = dateTo;
+    if (jobNumber.trim()) params.job_number = jobNumber.trim();
 
     api
       .getInspections(params)
@@ -59,13 +61,23 @@ export default function InspectionHistory() {
     setStatus("");
     setDateFrom("");
     setDateTo("");
+    setJobNumber("");
   };
 
   return (
     <div className="page">
+      <Link to="/" className="back-link">
+        ← Home
+      </Link>
       <h1>Inspection History</h1>
 
       <form className="filter-form" onSubmit={handleSubmit}>
+        <input
+          placeholder="Work Order #"
+          value={jobNumber}
+          onChange={(e) => setJobNumber(e.target.value)}
+        />
+
         <select value={clientId} onChange={(e) => setClientId(e.target.value)}>
           <option value="">All customers</option>
           {clients.map((c) => (
@@ -111,6 +123,7 @@ export default function InspectionHistory() {
             <tr>
               <th>Customer</th>
               <th>Part</th>
+              <th>WO#</th>
               <th>Type</th>
               <th>Date</th>
               <th>Status</th>
@@ -122,6 +135,7 @@ export default function InspectionHistory() {
               <tr key={i.id}>
                 <td>{i.client_name}</td>
                 <td>{i.part_number}</td>
+                <td>{i.job_number || "—"}</td>
                 <td>{i.type}</td>
                 <td>{i.date}</td>
                 <td>
@@ -136,7 +150,7 @@ export default function InspectionHistory() {
             ))}
             {inspections.length === 0 && (
               <tr>
-                <td colSpan={6} className="muted">
+                <td colSpan={7} className="muted">
                   No inspections match these filters.
                 </td>
               </tr>

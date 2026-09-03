@@ -56,6 +56,58 @@ router.get("/:id", (req, res) => {
   res.json({ ...drawing, points });
 });
 
+// GET /api/drawings/:id/analytics -- every measurement ever recorded
+// against this specific drawing revision, grouped per Find#, for the
+// "Measurement History" section on DataSheetTemplate.jsx. Scoped to this
+// one drawing_id (the current template revision the caller already has
+// loaded), not every historical revision of the part/operation's template.
+router.get("/:id/analytics", (req, res) => {
+  const rows = db
+    .prepare(
+      `SELECT m.balloon_point_id, m.measured_value, m.within_tolerance, m.sample_number,
+              i.id AS inspection_id, i.date, i.job_number
+       FROM measurements m
+       JOIN inspections i ON i.id = m.inspection_id
+       WHERE m.inspection_id IN (SELECT id FROM inspections WHERE drawing_id = ?)
+       ORDER BY i.date ASC`
+    )
+    .all(req.params.id);
+
+  const points = {};
+  const batchesByPoint = {};
+  rows.forEach((r) => {
+    if (!points[r.balloon_point_id]) points[r.balloon_point_id] = { totalRows: 0, filledRows: 0, readings: [] };
+    const p = points[r.balloon_point_id];
+    p.totalRows += 1;
+    if (r.measured_value != null) {
+      p.filledRows += 1;
+      p.readings.push({ value: r.measured_value, date: r.date, within_tolerance: r.within_tolerance });
+
+      if (!batchesByPoint[r.balloon_point_id]) batchesByPoint[r.balloon_point_id] = new Map();
+      const batches = batchesByPoint[r.balloon_point_id];
+      if (!batches.has(r.inspection_id)) {
+        batches.set(r.inspection_id, {
+          inspection_id: r.inspection_id,
+          job_number: r.job_number || "WO# —",
+          date: r.date,
+          samples: [],
+        });
+      }
+      batches.get(r.inspection_id).samples.push({
+        sample_number: r.sample_number,
+        value: r.measured_value,
+        within_tolerance: r.within_tolerance,
+      });
+    }
+  });
+
+  Object.entries(points).forEach(([pointId, p]) => {
+    p.batches = batchesByPoint[pointId] ? Array.from(batchesByPoint[pointId].values()) : [];
+  });
+
+  res.json({ points });
+});
+
 const getPriorFinalDrawing = db.prepare(
   "SELECT * FROM balloon_drawings WHERE part_id = ? AND operation_id IS NULL ORDER BY version DESC LIMIT 1"
 );
@@ -89,7 +141,7 @@ const insertPoint = db.prepare(`
 // decimal_places, new drawing_id) so it starts as an editable copy rather
 // than empty -- unless there is no prior version, in which case it starts
 // empty exactly as before.
-router.post("/", upload.single("image"), (req, res) => {
+router.post("/", attachRole, requireRole("qc", "admin", "engineer"), upload.single("image"), (req, res) => {
   const { version, revision_label } = req.body;
   let { part_id, operation_id } = req.body;
 
@@ -144,13 +196,29 @@ router.post("/", upload.single("image"), (req, res) => {
 // PUT /api/drawings/:id  (edit the free-text revision label printed on the
 // drawing's title block -- independent from the auto-incrementing version
 // number used for "latest" ordering)
-router.put("/:id", (req, res) => {
-  const { revision_label } = req.body;
-  const result = db
-    .prepare("UPDATE balloon_drawings SET revision_label = ? WHERE id = ?")
-    .run(revision_label?.trim() || null, req.params.id);
-  if (result.changes === 0) return res.status(404).json({ error: "Drawing not found" });
-  res.json(db.prepare("SELECT * FROM balloon_drawings WHERE id = ?").get(req.params.id));
+router.put("/:id", attachRole, requireRole("qc", "admin", "engineer"), (req, res) => {
+  const { revision_label, hundred_percent_inspection } = req.body;
+  // Built field-by-field (not a blanket COALESCE) since revision_label's own
+  // "clear it" gesture is an empty string -- which needs to actually write
+  // null, not fall through to "leave it alone" the way an omitted field does.
+  const setClauses = [];
+  const params = [];
+  if (revision_label !== undefined) {
+    setClauses.push("revision_label = ?");
+    params.push(revision_label?.trim() || null);
+  }
+  if (hundred_percent_inspection !== undefined) {
+    setClauses.push("hundred_percent_inspection = ?");
+    params.push(hundred_percent_inspection ? 1 : 0);
+  }
+  if (setClauses.length > 0) {
+    params.push(req.params.id);
+    const result = db.prepare(`UPDATE balloon_drawings SET ${setClauses.join(", ")} WHERE id = ?`).run(...params);
+    if (result.changes === 0) return res.status(404).json({ error: "Drawing not found" });
+  }
+  const drawing = db.prepare("SELECT * FROM balloon_drawings WHERE id = ?").get(req.params.id);
+  if (!drawing) return res.status(404).json({ error: "Drawing not found" });
+  res.json(drawing);
 });
 
 // DELETE /api/drawings/:id  (cascades to its balloon_points; blocked if any point
@@ -173,7 +241,7 @@ router.delete("/:id", attachRole, requireRole("qc", "admin"), (req, res) => {
 
 // POST /api/drawings/:id/points  (adds a point with its specification, appended
 // to the end of the column order)
-router.post("/:id/points", (req, res) => {
+router.post("/:id/points", attachRole, requireRole("qc", "admin", "engineer"), (req, res) => {
   const { balloon_number, max_spec, min_spec, mean_value, decimal_places } = req.body;
   if (!balloon_number) return res.status(400).json({ error: "balloon_number is required" });
 
@@ -203,7 +271,7 @@ router.post("/:id/points", (req, res) => {
 });
 
 // PUT /api/drawings/points/:id  (edit an existing point's Find#, spec, or decimal places)
-router.put("/points/:id", (req, res) => {
+router.put("/points/:id", attachRole, requireRole("qc", "admin", "engineer"), (req, res) => {
   const { balloon_number, max_spec, min_spec, mean_value, decimal_places } = req.body;
   if (!balloon_number) return res.status(400).json({ error: "balloon_number is required" });
 

@@ -3,6 +3,8 @@ import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom"
 import { api } from "../api/client";
 import { inspectionLabel, resultStatus, resultLabel } from "../lib/format";
 import { useConfirm } from "../hooks/useConfirm";
+import PageNav from "../components/PageNav";
+import TemplateEditLink from "../components/TemplateEditLink";
 
 // The "Data Sheet" folder at the top is the entry point an inspector opens
 // every time an inspection is needed: it resumes the currently open (in
@@ -16,6 +18,7 @@ export default function Inspections() {
   // normal QC path (see Clients.jsx for where a non-default type comes from).
   const type = searchParams.get("type") || "final";
   const [part, setPart] = useState(null);
+  const [clientName, setClientName] = useState(null);
   const [inspections, setInspections] = useState([]);
   const [drawings, setDrawings] = useState([]);
   const [error, setError] = useState(null);
@@ -32,6 +35,12 @@ export default function Inspections() {
   useEffect(() => {
     load();
   }, [partId, type]);
+
+  // For the breadcrumb trail only -- getPart doesn't include the client's name.
+  useEffect(() => {
+    if (!part?.client_id) return;
+    api.getClient(part.client_id).then((c) => setClientName(c.name)).catch(() => {});
+  }, [part?.client_id]);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -84,16 +93,18 @@ export default function Inspections() {
 
   return (
     <div className="page">
-      <Link
-        to={
-          part
-            ? `/clients/${part.client_id}/parts${type !== "final" ? `?type=${type}` : ""}`
-            : "/clients"
-        }
-        className="back-link"
-      >
-        ← Parts
-      </Link>
+      <PageNav
+        backTo={part ? `/clients/${part.client_id}/parts${type !== "final" ? `?type=${type}` : ""}` : "/clients"}
+        backLabel="Back to Parts"
+        items={[
+          { label: "Home", to: "/" },
+          {
+            label: clientName ?? "…",
+            to: part ? `/clients/${part.client_id}/parts${type !== "final" ? `?type=${type}` : ""}` : "/clients",
+          },
+          { label: part?.part_number ?? `Part #${partId}` },
+        ]}
+      />
       <h1>{part?.part_number ?? `Part #${partId}`}</h1>
 
       <button className="datasheet-file" onClick={openDataSheet} disabled={opening}>
@@ -110,9 +121,7 @@ export default function Inspections() {
         </svg>
         <span className="datasheet-file-label">Data Sheet — {part?.part_number ?? `Part #${partId}`}</span>
       </button>
-      <Link to={`/parts/${partId}/template`} className="secondary-link">
-        Data Sheet Template
-      </Link>
+      <TemplateEditLink to={`/parts/${partId}/template${type !== "final" ? `?type=${type}` : ""}`} />
 
       {error && <p className="error">{error}</p>}
 

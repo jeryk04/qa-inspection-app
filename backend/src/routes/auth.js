@@ -23,7 +23,13 @@ router.post("/login", (req, res) => {
 
   const token = signToken(user);
   res.cookie(COOKIE_NAME, token, COOKIE_OPTIONS);
-  res.json({ id: user.id, username: user.username, full_name: user.full_name, role: user.role });
+  res.json({
+    id: user.id,
+    username: user.username,
+    full_name: user.full_name,
+    role: user.role,
+    must_change_password: !!user.must_change_password,
+  });
 });
 
 // POST /api/auth/logout
@@ -41,12 +47,47 @@ router.get("/me", (req, res) => {
     const payload = verifyToken(token);
     // role isn't in the JWT (it's not embedded at login, see attachRole.js for
     // why) -- look it up fresh so a role change is reflected without re-login.
-    const user = db.prepare("SELECT id, username, full_name, role FROM users WHERE id = ?").get(payload.sub);
+    const user = db
+      .prepare("SELECT id, username, full_name, role, must_change_password FROM users WHERE id = ?")
+      .get(payload.sub);
     if (!user) return res.status(401).json({ error: "Not authenticated" });
-    res.json(user);
+    res.json({ ...user, must_change_password: !!user.must_change_password });
   } catch {
     res.status(401).json({ error: "Not authenticated" });
   }
+});
+
+// PUT /api/auth/password  { current_password, new_password } -- self-service
+// change, available to any logged-in user (not just must_change_password
+// accounts) so people can rotate their own password whenever they want, not
+// only on the forced first-login prompt.
+router.put("/password", (req, res) => {
+  const token = req.cookies?.[COOKIE_NAME];
+  if (!token) return res.status(401).json({ error: "Not authenticated" });
+
+  let payload;
+  try {
+    payload = verifyToken(token);
+  } catch {
+    return res.status(401).json({ error: "Not authenticated" });
+  }
+
+  const { current_password, new_password } = req.body;
+  if (!current_password || !new_password) {
+    return res.status(400).json({ error: "current_password and new_password are required" });
+  }
+  if (new_password.length < 6) {
+    return res.status(400).json({ error: "New password must be at least 6 characters" });
+  }
+
+  const user = db.prepare("SELECT * FROM users WHERE id = ?").get(payload.sub);
+  if (!user || !bcrypt.compareSync(current_password, user.password_hash)) {
+    return res.status(401).json({ error: "Current password is incorrect" });
+  }
+
+  const password_hash = bcrypt.hashSync(new_password, 10);
+  db.prepare("UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?").run(password_hash, user.id);
+  res.status(204).send();
 });
 
 module.exports = router;

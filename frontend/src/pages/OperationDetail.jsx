@@ -1,8 +1,16 @@
 import { useEffect, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
+import { useAuth } from "../context/AuthContext";
 import { inspectionLabel, resultStatus, resultLabel } from "../lib/format";
 import { useConfirm } from "../hooks/useConfirm";
+import PageNav from "../components/PageNav";
+import TemplateEditLink from "../components/TemplateEditLink";
+
+// Matches DataSheetTemplate.jsx's own guard and backend/src/routes/
+// inspections.js's requireRole("qc", "admin") on DELETE /:id.
+const TEMPLATE_EDIT_ROLES = ["qc", "admin", "engineer"];
+const CAN_DELETE_ROLES = ["qc", "admin"];
 
 // Mirrors Inspections.jsx's "Data Sheet folder + history" structure, scoped
 // to one operation_id instead of a part's Final drawing. See Inspections.jsx
@@ -10,10 +18,27 @@ import { useConfirm } from "../hooks/useConfirm";
 // reuse of Inspections.jsx) since the two pages are wired to different route
 // params (partId only vs. partId+operationId) and Inspections.jsx was left
 // untouched by design for this step.
+//
+// Generic over ?type= (in_process or setup) -- Set-up and In-Process each
+// have their own independent operations + Data Sheet Templates for the same
+// part (see schema.sql's operations.scope comment), so the operationId this
+// page is reached with is already scoped correctly by OperationsList.jsx;
+// this just needs ?type= to pick the matching Data Sheet history and label.
+// Defaults to "in_process" since that's the only type this page served
+// before Set-up Inspection was added.
+const TYPE_LABELS = { in_process: "In-Process", setup: "Set-up" };
+
 export default function OperationDetail() {
   const { partId, operationId } = useParams();
+  const { user } = useAuth();
+  const canEditTemplate = TEMPLATE_EDIT_ROLES.includes(user?.role);
+  const canDelete = CAN_DELETE_ROLES.includes(user?.role);
+  const [searchParams] = useSearchParams();
+  const type = searchParams.get("type") || "in_process";
+  const typeLabel = TYPE_LABELS[type] ?? type;
   const navigate = useNavigate();
   const [part, setPart] = useState(null);
+  const [clientName, setClientName] = useState(null);
   const [operation, setOperation] = useState(null);
   const [inspections, setInspections] = useState([]);
   const [drawings, setDrawings] = useState([]);
@@ -29,7 +54,7 @@ export default function OperationDetail() {
       .then((ops) => setOperation(ops.find((o) => String(o.id) === operationId) ?? null))
       .catch((e) => setError(e.message));
     api
-      .getInspections({ operation_id: operationId, type: "in_process" })
+      .getInspections({ operation_id: operationId, type })
       .then(setInspections)
       .catch((e) => setError(e.message));
     api.getOperationDrawings(operationId).then(setDrawings).catch((e) => setError(e.message));
@@ -37,7 +62,13 @@ export default function OperationDetail() {
 
   useEffect(() => {
     load();
-  }, [partId, operationId]);
+  }, [partId, operationId, type]);
+
+  // For the breadcrumb trail only -- getPart doesn't include the client's name.
+  useEffect(() => {
+    if (!part?.client_id) return;
+    api.getClient(part.client_id).then((c) => setClientName(c.name)).catch(() => {});
+  }, [part?.client_id]);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -79,7 +110,7 @@ export default function OperationDetail() {
         part_id: Number(partId),
         drawing_id: drawing.id,
         operation_id: Number(operationId),
-        type: "in_process",
+        type,
       });
       navigate(`/inspections/${inspection.id}`);
     } catch (e) {
@@ -91,11 +122,18 @@ export default function OperationDetail() {
 
   return (
     <div className="page">
-      <Link to={`/parts/${partId}/operations`} className="back-link">
-        ← Operations
-      </Link>
+      <PageNav
+        backTo={`/parts/${partId}/operations?type=${type}`}
+        backLabel="Back to Operations"
+        items={[
+          { label: "Home", to: "/" },
+          { label: clientName ?? "…", to: part ? `/clients/${part.client_id}/parts?type=${type}` : "/clients" },
+          { label: part?.part_number ?? `Part #${partId}`, to: `/parts/${partId}/operations?type=${type}` },
+          { label: operation?.name ?? "Operation" },
+        ]}
+      />
       <h1>
-        {operation?.name ?? "Operation"} — {part?.part_number ?? `Part #${partId}`}
+        {typeLabel} — {operation?.name ?? "Operation"} — {part?.part_number ?? `Part #${partId}`}
       </h1>
 
       <button className="datasheet-file" onClick={openDataSheet} disabled={opening}>
@@ -110,22 +148,24 @@ export default function OperationDetail() {
         >
           <path d="M3 7a2 2 0 0 1 2-2h3.5l1.5 2H19a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" />
         </svg>
-        <span className="datasheet-file-label">Data Sheet — {operation?.name ?? "Operation"}</span>
+        <span className="datasheet-file-label">
+          {typeLabel} Data Sheet — {operation?.name ?? "Operation"}
+        </span>
       </button>
-      <Link to={`/parts/${partId}/template?operation_id=${operationId}`} className="secondary-link">
-        Data Sheet Template
-      </Link>
+      {canEditTemplate && (
+        <TemplateEditLink to={`/parts/${partId}/template?operation_id=${operationId}&type=${type}`} />
+      )}
 
       {error && <p className="error">{error}</p>}
 
-      <h2>Inspection History</h2>
-      <p className="muted">Right-click an inspection to delete it.</p>
+      <h2>{typeLabel} Inspection History</h2>
+      {canDelete && <p className="muted">Right-click an inspection to delete it.</p>}
       {groupByYear(inspections).map(([year, yearInspections]) => (
         <div key={year}>
           <h3>{year}</h3>
           <ul className="card-list">
             {yearInspections.map((i) => (
-              <li key={i.id} className="card" onContextMenu={(e) => handleContextMenu(e, i)}>
+              <li key={i.id} className="card" onContextMenu={canDelete ? (e) => handleContextMenu(e, i) : undefined}>
                 <Link to={`/inspections/${i.id}`}>
                   <strong>{inspectionLabel(i)}</strong>
                   <span className="muted"> · </span>

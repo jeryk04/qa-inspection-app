@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
 import { useConfirm } from "../hooks/useConfirm";
+import { incomingBackHref, INCOMING_ONLY_PARTS } from "../lib/incoming";
+import PageNav from "../components/PageNav";
 
 const MAX_RESULTS = 30;
 
@@ -12,6 +14,7 @@ export default function Parts() {
   // picker chain; absent (and thus a no-op) for the normal QC path.
   const type = searchParams.get("type");
   const [parts, setParts] = useState([]);
+  const [clientName, setClientName] = useState(null);
   const [query, setQuery] = useState("");
   const [partNumber, setPartNumber] = useState("");
   const [description, setDescription] = useState("");
@@ -29,6 +32,18 @@ export default function Parts() {
 
   useEffect(() => {
     load();
+  }, [clientId]);
+
+  // Needed both to route the "back" link when arrived via Incoming
+  // Inspection (see lib/incoming.js) AND, regardless of entry point, to
+  // check a part's name against INCOMING_ONLY_PARTS below -- getParts
+  // doesn't include the client's own name, and there's no single-client
+  // fetch endpoint.
+  useEffect(() => {
+    api
+      .getClients()
+      .then((clients) => setClientName(clients.find((c) => String(c.id) === clientId)?.name ?? null))
+      .catch(() => {});
   }, [clientId]);
 
   useEffect(() => {
@@ -94,29 +109,48 @@ export default function Parts() {
     }
   };
 
-  // in_process goes to the per-part Operations list instead of straight to a
-  // Data Sheet -- every other type (including the default, unset "final"
-  // case) keeps the existing single-Data-Sheet flow untouched.
+  // in_process and setup both go to the per-part Operations list instead of
+  // straight to a Data Sheet -- they check a specific manufacturing step, not
+  // the whole part, so each operation needs its own Data Sheet Template.
+  // Every other type (including the default, unset "final" case) keeps the
+  // existing single-Data-Sheet flow untouched.
   const partHref = (id) => {
-    if (type === "in_process") return `/parts/${id}/operations`;
+    if (type === "in_process" || type === "setup") return `/parts/${id}/operations?type=${type}`;
     return type ? `/parts/${id}/inspections?type=${type}` : `/parts/${id}/inspections`;
   };
 
   const trimmedQuery = query.trim().toLowerCase();
   const visibleParts = useMemo(() => {
-    if (!trimmedQuery) return parts;
-    return parts.filter(
+    // A "double duty" client (e.g. Kawasaki, TRB) can have a part filed
+    // under it purely for Incoming Inspection browsing (see lib/incoming.js)
+    // alongside its real manufacturing parts -- only show that entry when
+    // actually reached via the /incoming flow, not from Final/Set-up/
+    // In-Process, where it isn't a real part to inspect.
+    const scoped =
+      type === "incoming"
+        ? parts
+        : parts.filter((p) => !INCOMING_ONLY_PARTS.has(`${clientName}:${p.part_number}`));
+    if (!trimmedQuery) return scoped;
+    return scoped.filter(
       (p) =>
         p.part_number.toLowerCase().includes(trimmedQuery) ||
         (p.description && p.description.toLowerCase().includes(trimmedQuery))
     );
-  }, [parts, trimmedQuery]);
+  }, [parts, trimmedQuery, type, clientName]);
 
   return (
     <div className="page">
-      <Link to={type ? `/clients?type=${type}` : "/clients"} className="back-link">
-        ← Customers
-      </Link>
+      <PageNav
+        backTo={type === "incoming" ? incomingBackHref(clientName) : type ? `/clients?type=${type}` : "/clients"}
+        backLabel={type === "incoming" ? "Back to Folders" : "Back to Customers"}
+        items={[
+          { label: "Home", to: "/" },
+          type === "incoming"
+            ? { label: "Folders", to: incomingBackHref(clientName) }
+            : { label: "Customers", to: type ? `/clients?type=${type}` : "/clients" },
+          { label: clientName ?? "…" },
+        ]}
+      />
       <h1>Parts</h1>
 
       <div className="search-bar">

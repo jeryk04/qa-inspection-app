@@ -79,14 +79,163 @@ body {
   background: var(--bg);
 }
 
-.nav-user {
-  color: var(--text);
-  font-size: 13px;
-  font-weight: 600;
-  padding: 6px 12px;
-  background: var(--bg);
+.account-menu {
+  position: relative;
+  margin-left: 4px;
+}
+
+.account-menu-trigger {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: white;
   border: 1px solid var(--border);
   border-radius: 999px;
+  padding: 5px 12px 5px 5px;
+  min-height: auto;
+  cursor: pointer;
+  font: inherit;
+  color: var(--text);
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+
+.account-menu-trigger:hover,
+.account-menu-trigger[aria-expanded="true"] {
+  border-color: var(--accent);
+  background: var(--accent-tint);
+}
+
+.account-avatar {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #123a5c 0%, #2f6690 100%);
+  color: white;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+}
+
+.account-menu-name {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-menu-chevron {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  transition: transform 0.15s ease;
+}
+
+.account-menu-trigger[aria-expanded="true"] .account-menu-chevron {
+  transform: rotate(180deg);
+}
+
+.account-menu-panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 1000;
+  min-width: 220px;
+  background: white;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow-lg);
+  padding: 8px;
+}
+
+.account-menu-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px 14px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.account-avatar-lg {
+  width: 38px;
+  height: 38px;
+  font-size: 14px;
+}
+
+.account-menu-fullname {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.account-menu-role {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.account-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 10px;
+  min-height: auto;
+  border-radius: 6px;
+  background: none;
+  border: none;
+  box-shadow: none;
+  color: var(--text);
+  font-size: 13.5px;
+  font-weight: 600;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.account-menu-item:hover {
+  background: var(--bg);
+}
+
+.account-menu-item-danger {
+  color: var(--fail);
+}
+
+.account-menu-item-danger:hover {
+  background: var(--fail-bg);
+}
+
+.account-menu-item svg {
+  flex-shrink: 0;
+}
+
+.account-menu-item-active {
+  color: var(--accent-bright);
+  background: var(--accent-tint);
+}
+
+.account-menu-item-active:hover {
+  background: var(--accent-tint);
+}
+
+.account-menu-section {
+  padding-bottom: 6px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.account-menu-section-label {
+  padding: 4px 10px 6px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
 }
 
 .type-grid {
@@ -99,20 +248,39 @@ body {
 .type-card {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 14px;
   background: white;
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 28px 24px;
+  border-radius: 10px;
+  padding: 24px;
   text-decoration: none;
   color: var(--text);
   font-size: 17px;
-  transition: border-color 0.12s ease, background 0.12s ease;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
 }
 
 .type-card:hover {
   border-color: var(--accent);
   background: var(--accent-tint);
+  transform: translateY(-2px);
+  box-shadow: 0 8px 20px rgba(16, 24, 40, 0.09);
+}
+
+.type-card-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+  background: var(--accent-tint);
+  color: var(--accent);
+}
+
+.type-card-disabled .type-card-icon {
+  background: var(--bg);
+  color: #9aa4b2;
 }
 
 /* AdminMenu's options are a state change, not a navigation, so they're
@@ -145,6 +313,216 @@ button.type-card {
   padding: 2px 8px;
 }
 
+.dashboard-hero {
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(135deg, #123a5c 0%, #1d5c85 55%, #2f6690 100%);
+  padding: 32px 24px 40px;
+}
+
+.dashboard-hero::before,
+.dashboard-hero::after {
+  content: "";
+  position: absolute;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.07);
+  pointer-events: none;
+}
+
+.dashboard-hero::before {
+  width: 380px;
+  height: 380px;
+  top: -220px;
+  right: -60px;
+}
+
+.dashboard-hero::after {
+  width: 220px;
+  height: 220px;
+  bottom: -160px;
+  left: 8%;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.dashboard-hero-inner {
+  position: relative;
+  z-index: 1;
+  max-width: 880px;
+  margin: 0 auto;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.dashboard-hero-inner h1 {
+  margin: 0;
+  color: white;
+}
+
+.dashboard-greeting {
+  margin: 0 0 2px;
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.role-badge {
+  flex-shrink: 0;
+  margin-top: 6px;
+  font-size: 11.5px;
+  font-weight: 700;
+  color: white;
+  background: rgba(255, 255, 255, 0.16);
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 999px;
+  padding: 5px 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+}
+
+.stats-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 16px;
+  margin-top: 20px;
+}
+
+.stat-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: white;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--border);
+  border-radius: 10px;
+  padding: 18px 20px;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+}
+
+.stat-card-value {
+  font-size: 30px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.stat-card-label {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.stat-card-ok {
+  border-left-color: var(--ok);
+}
+
+.stat-card-ok .stat-card-value {
+  color: var(--ok);
+}
+
+.stat-card-fail {
+  border-left-color: var(--fail);
+}
+
+.stat-card-fail .stat-card-value {
+  color: var(--fail);
+}
+
+.stat-card-warn {
+  border-left-color: var(--warn);
+}
+
+.stat-card-warn .stat-card-value {
+  color: var(--warn);
+}
+
+.stat-card-conditional {
+  border-left-color: var(--conditional);
+}
+
+.stat-card-conditional .stat-card-value {
+  color: var(--conditional);
+}
+
+.recent-activity {
+  margin-top: 8px;
+}
+
+.activity-list {
+  list-style: none;
+  padding: 0;
+  margin: 12px 0 0;
+  background: white;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.activity-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
+}
+
+.activity-item:last-child {
+  border-bottom: none;
+}
+
+.activity-dot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.activity-dot-approved {
+  background: var(--ok);
+}
+
+.activity-dot-rejected {
+  background: var(--fail);
+}
+
+.activity-link {
+  flex: 1;
+  min-width: 0;
+  text-decoration: none;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-action {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.activity-action-approved {
+  background: var(--ok-bg);
+  color: var(--ok);
+}
+
+.activity-action-rejected {
+  background: var(--fail-bg);
+  color: var(--fail);
+}
+
+.activity-time {
+  flex-shrink: 0;
+  font-size: 12.5px;
+  min-width: 56px;
+  text-align: right;
+}
+
 .login-page {
   max-width: 360px;
   margin: 80px auto 0;
@@ -169,6 +547,16 @@ button.type-card {
   padding: 24px;
 }
 
+/* Opt-in override for pages that genuinely need more than the standard
+   880px reading-width column -- currently just the Engineer Dashboard,
+   whose two-column layout (tabs+content beside the Needs Attention
+   sidebar) and the Part Lookup master-detail pane inside it were being
+   squeezed into a narrow strip with the rest of the viewport sitting
+   empty. Every other .page usage is untouched. */
+.page-wide {
+  max-width: 1280px;
+}
+
 h1 {
   color: var(--text);
   font-size: 24px;
@@ -183,10 +571,534 @@ h2 {
   margin-top: 28px;
 }
 
-.autosave-status {
+.form-card {
+  background: white;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 20px 24px;
+  margin: 20px 0;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+}
+
+.form-card h2 {
+  margin-top: 0;
+}
+
+.form-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+/* Engineer dashboard charts (frontend/src/components/charts/) -- shared
+   chrome: empty state, gridlines/axis text, hover crosshair + tooltip. */
+.chart-empty {
+  margin: 8px 0 0;
+}
+
+.trend-line-wrap {
+  position: relative;
+}
+
+.trend-line-svg {
+  width: 100%;
+  height: 180px;
+  overflow: visible;
+}
+
+.chart-gridline {
+  stroke: var(--border);
+  stroke-width: 1;
+}
+
+/* Spec reference lines (RunChart.jsx's Max/Mean/Min) -- solid, one step
+   more visible than a plain scale gridline since these are meaningful
+   limits, never dashed (see the dataviz skill: dashing reads as noise). */
+.chart-refline {
+  stroke: var(--border-strong);
+  stroke-width: 1;
+}
+
+.chart-footnote {
+  margin: 6px 0 0;
   font-size: 12px;
-  font-weight: 400;
+}
+
+/* Process Capability badge (RunChart.jsx's Cpk) -- neutral (informational,
+   low sample count) until there's enough data to trust a capable/not-
+   capable flag, then status-colored like everything else that means
+   good/bad in this app. */
+.cpk-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.cpk-badge-ok {
+  background: var(--ok-bg);
+  color: var(--ok);
+}
+
+.cpk-badge-fail {
+  background: var(--fail-bg);
+  color: var(--fail);
+}
+
+.cpk-badge-n {
+  font-weight: 600;
+  opacity: 0.75;
+}
+
+.chart-axis-label {
+  fill: var(--text-muted);
+  font-size: 10px;
+}
+
+.chart-crosshair {
+  stroke: var(--border-strong);
+  stroke-width: 1;
+}
+
+/* RunChart.jsx's per-batch mean tick -- a short neutral dash marking one
+   batch's center (Xbar-chart convention), deliberately quieter than the
+   status-colored sample dots since it's a computed summary, not a real
+   reading. */
+.chart-batch-mean {
+  stroke: var(--text-muted);
+  stroke-width: 2;
+}
+
+/* RunChart.jsx's UCL/LCL control limits -- what THIS process actually
+   does, as opposed to .chart-refline's Max/Mean/Min (what the customer
+   requires). Given the accent token so the two kinds of limit read as
+   visually distinct even though both are solid, single-px reference
+   lines, and labeled on the opposite (right) edge from the spec values
+   so the two label sets never collide. */
+.chart-control-line {
+  stroke: var(--accent);
+  stroke-width: 1;
+  opacity: 0.55;
+}
+
+.chart-control-label {
+  fill: var(--accent);
+}
+
+.chart-tooltip {
+  position: absolute;
+  transform: translate(-50%, -130%);
+  background: var(--primary);
+  color: white;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: var(--shadow-lg);
+  z-index: 5;
+}
+
+.chart-tooltip-static {
+  position: static;
+  transform: none;
+  display: inline-block;
+  margin-top: 6px;
+}
+
+/* Ranked bars (RankedBars.jsx) -- horizontal, single flat hue, one row per
+   category; each row is its own hover/focus target. */
+.ranked-bars {
+  list-style: none;
+  padding: 0;
+  margin: 4px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ranked-bar-row {
+  display: grid;
+  grid-template-columns: minmax(90px, 160px) 1fr 32px;
+  align-items: center;
+  gap: 12px;
+  position: relative;
+  outline: none;
+}
+
+.ranked-bar-label {
+  font-size: 13.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ranked-bar-track {
+  display: block;
+  height: 12px;
+  background: var(--bg);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.ranked-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.2s ease;
+}
+
+.ranked-bar-value {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-align: right;
+}
+
+/* Engineer Dashboard two-column layout (Home.jsx's EngineerHome) -- tabs +
+   their content on the left, Needs Attention as a persistent sidebar on
+   the right instead of a full-width block above everything. */
+.engineer-layout {
+  display: flex;
+  align-items: flex-start;
+  gap: 24px;
+}
+
+.engineer-layout-main {
+  flex: 1;
+  min-width: 0; /* lets the Part Lookup master-detail pane shrink inside the flex row instead of overflowing */
+}
+
+.engineer-layout-sidebar {
+  flex: 0 0 340px;
+  position: sticky;
+  top: 16px;
+}
+
+.engineer-layout-sidebar .attention-panel {
+  margin: 0;
+}
+
+@media (max-width: 960px) {
+  .engineer-layout {
+    flex-direction: column;
+  }
+
+  .engineer-layout-sidebar {
+    flex: none;
+    width: 100%;
+    position: static;
+  }
+}
+
+/* Tab strip (Tabs.jsx) -- underline-style, matching this app's existing
+   restrained chrome rather than a heavier boxed-pill look. */
+.tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  margin: 24px 0 20px;
+}
+
+.tab-btn {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  box-shadow: none;
+  padding: 10px 4px;
+  margin-right: 20px;
+  min-height: auto;
+  font-size: 14.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.tab-btn:hover {
+  color: var(--text);
+  background: none;
+}
+
+.tab-btn-active {
+  color: var(--accent-bright);
+  border-bottom-color: var(--accent);
+}
+
+/* Pareto mode (RankedBars.jsx's cumulative prop). */
+.ranked-bar-cumulative {
+  display: block;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--text-muted);
   text-transform: none;
+  letter-spacing: normal;
+}
+
+.ranked-bar-pareto-divider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.ranked-bar-pareto-divider::before,
+.ranked-bar-pareto-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border-strong);
+}
+
+/* Meter (Meter.jsx) -- a single ratio against 100%, fill in --ok, track a
+   lighter step of the same hue so state reads across the whole bar. */
+.meter-track {
+  height: 16px;
+  background: var(--ok-bg);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.meter-fill {
+  height: 100%;
+  background: var(--ok);
+  border-radius: 999px;
+  transition: width 0.2s ease;
+}
+
+.meter-readout {
+  margin-top: 10px;
+  font-size: 15px;
+}
+
+.meter-readout strong {
+  color: var(--ok);
+  font-size: 20px;
+}
+
+/* Needs Attention panel (Home.jsx's NeedsAttention) -- the dashboard's
+   headline alert, so it wears status-fail coloring prominently instead of
+   the neutral .form-card chrome everything else uses. */
+.attention-panel {
+  background: var(--fail-bg);
+  border: 1px solid var(--fail);
+  border-radius: 10px;
+  padding: 18px 20px;
+  margin: 20px 0;
+}
+
+.attention-panel-clear {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  background: var(--ok-bg);
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+.attention-panel-clear p {
+  margin: 2px 0 0;
+}
+
+.attention-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--fail);
+}
+
+.attention-panel-header h2 {
+  margin: 0;
+  color: var(--text);
+}
+
+.attention-list {
+  list-style: none;
+  padding: 0;
+  margin: 14px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.attention-item {
+  position: relative;
+  background: white;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 34px 12px 14px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.attention-item:hover {
+  border-color: var(--fail);
+  background: var(--accent-tint);
+}
+
+.attention-item-main {
+  font-size: 14.5px;
+}
+
+.attention-item-detail {
+  margin-top: 2px;
+  font-size: 13px;
+}
+
+/* Engineer-controlled dismiss (see dismissed_alerts in schema.sql) --
+   reappears on its own if the point fails again, so this is a quiet "seen
+   it" ack, not a delete; kept subtle (ghost X) so it doesn't compete with
+   the alert content itself. */
+.attention-item-dismiss {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  min-height: auto;
+  padding: 0;
+  background: none;
+  border: none;
+  box-shadow: none;
+  border-radius: 6px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.attention-item-dismiss:hover {
+  background: var(--fail-bg);
+  color: var(--fail);
+}
+
+.attention-value {
+  color: var(--fail);
+}
+
+.autosave-pill {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.autosave-pill-saving {
+  background: var(--accent-tint);
+  color: var(--accent);
+}
+
+.autosave-pill-unsaved {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+.signoff-card {
+  border-top: 3px solid var(--accent);
+}
+
+.sheet-title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+
+.sheet-title-row h1 {
+  margin-bottom: 8px;
+}
+
+.sheet-toolbar {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.toolbar-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: white;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: border-color 0.12s ease, background 0.12s ease, color 0.12s ease;
+}
+
+.toolbar-btn:hover {
+  border-color: var(--accent);
+  background: var(--accent-tint);
+  color: var(--accent);
+}
+
+.audit-timeline {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.audit-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+
+.audit-item:last-child {
+  border-bottom: none;
+}
+
+.audit-dot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--border-strong);
+}
+
+.audit-dot-ok {
+  background: var(--ok);
+}
+
+.audit-dot-fail {
+  background: var(--fail);
+}
+
+.audit-item-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.audit-item-time {
+  flex-shrink: 0;
+  font-size: 12px;
 }
 
 .back-link {
@@ -195,6 +1107,179 @@ h2 {
   color: var(--accent);
   text-decoration: none;
   font-size: 14px;
+}
+
+/* Modern back button + breadcrumb trail (OperationsList.jsx) -- a bigger,
+   tappable icon button for "back one step" plus a breadcrumb for jumping
+   straight to any earlier level, instead of a plain "← Parts" text link. */
+.page-nav {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.back-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  border-radius: 999px;
+  background: white;
+  border: 1px solid var(--border);
+  color: var(--text);
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease, transform 0.15s ease;
+}
+
+.back-icon-btn:hover {
+  border-color: var(--accent);
+  background: var(--accent-tint);
+  color: var(--accent);
+  transform: translateX(-2px);
+}
+
+.breadcrumbs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  font-size: 13.5px;
+}
+
+.breadcrumb-segment {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.breadcrumb-sep {
+  color: #b7bec9;
+  flex-shrink: 0;
+}
+
+.breadcrumb-link {
+  color: var(--text-muted);
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.breadcrumb-link:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.breadcrumb-current {
+  color: var(--text);
+  font-weight: 700;
+}
+
+.page-title-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+
+.page-title-row h1 {
+  margin: 0;
+}
+
+.scope-badge {
+  display: inline-block;
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+
+.scope-badge-neutral {
+  background: var(--accent-tint);
+  color: var(--accent-bright);
+}
+
+.scope-badge-ok {
+  background: var(--ok-bg);
+  color: var(--ok);
+}
+
+.scope-badge-conditional {
+  background: var(--conditional-bg);
+  color: var(--conditional);
+}
+
+/* Operation picker cards (OperationsList.jsx) -- an enlarged, icon-bearing
+   variant of .type-card, since these are the primary tappable targets on
+   this screen and were reading as visually flat/basic next to the rest of
+   the app's card-based pickers. */
+.operation-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 18px;
+  margin-top: 20px;
+}
+
+.operation-card {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  background: white;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 22px 24px;
+  text-decoration: none;
+  color: var(--text);
+  font-size: 18px;
+  box-shadow: 0 1px 3px rgba(16, 24, 40, 0.05);
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
+  cursor: pointer;
+  font-family: inherit;
+  width: 100%;
+  text-align: left;
+}
+
+.operation-card:hover {
+  border-color: var(--accent);
+  background: var(--accent-tint);
+  transform: translateY(-3px);
+  box-shadow: 0 10px 24px rgba(16, 24, 40, 0.1);
+}
+
+.operation-card-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 48px;
+  height: 48px;
+  border-radius: 12px;
+  background: var(--accent-tint);
+  color: var(--accent);
+}
+
+.operation-card-new {
+  border-style: dashed;
+  border-color: var(--border-strong);
+  color: var(--text-muted);
+  background: transparent;
+  box-shadow: none;
+}
+
+.operation-card-new:hover {
+  border-style: dashed;
+}
+
+.operation-card-icon-new {
+  font-size: 22px;
+  font-weight: 700;
+  background: var(--bg);
+  color: var(--text-muted);
 }
 
 .muted {
@@ -216,6 +1301,19 @@ h2 {
   gap: 8px;
   flex-wrap: wrap;
   margin: 16px 0;
+}
+
+.hundred-percent-toggle {
+  align-items: center;
+  max-width: 640px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.hundred-percent-toggle input {
+  width: auto;
+  min-height: auto;
+  flex-shrink: 0;
 }
 
 input,
@@ -471,6 +1569,140 @@ button.reject {
   background: var(--accent-tint);
 }
 
+/* Part Lookup master-detail layout (Home.jsx's PartAnalyticsSection) -- a
+   browsable/searchable list on the left, the selected part's charts on the
+   right, the same shape as a mail client or contacts app. */
+.part-lookup-layout {
+  display: flex;
+  align-items: stretch;
+  background: white;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+  overflow: hidden;
+  min-height: 420px;
+}
+
+.part-lookup-list {
+  flex: 0 0 320px;
+  border-right: 1px solid var(--border);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+  max-height: 640px;
+}
+
+.part-lookup-list .search-bar {
+  margin: 0;
+  max-width: none;
+}
+
+.part-lookup-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.part-lookup-customer-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: none;
+  border: none;
+  box-shadow: none;
+  padding: 9px 6px;
+  min-height: auto;
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.part-lookup-customer-toggle:hover {
+  background: var(--bg);
+}
+
+.part-lookup-chevron {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  transition: transform 0.12s ease;
+}
+
+.part-lookup-chevron-open {
+  transform: rotate(90deg);
+}
+
+.part-lookup-count {
+  margin-left: auto;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.part-lookup-parts {
+  list-style: none;
+  padding: 0 0 4px 30px;
+  margin: 0;
+}
+
+.part-lookup-part-btn {
+  display: block;
+  width: 100%;
+  background: none;
+  border: none;
+  box-shadow: none;
+  padding: 7px 8px;
+  min-height: auto;
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--text-muted);
+  text-align: left;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.part-lookup-part-btn:hover {
+  background: var(--bg);
+  color: var(--text);
+}
+
+.part-lookup-part-btn-active {
+  background: var(--accent-tint);
+  color: var(--accent-bright);
+  font-weight: 700;
+}
+
+.part-lookup-detail {
+  flex: 1;
+  padding: 20px 24px;
+  overflow-y: auto;
+  max-height: 640px;
+}
+
+.part-lookup-detail h3 {
+  margin-top: 0;
+}
+
+@media (max-width: 640px) {
+  .part-lookup-layout {
+    flex-direction: column;
+  }
+
+  .part-lookup-list {
+    flex: none;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    max-height: 280px;
+  }
+
+  .part-lookup-detail {
+    max-height: none;
+  }
+}
+
 .card a {
   text-decoration: none;
   color: #1a1a1a;
@@ -518,6 +1750,52 @@ button.reject {
   color: var(--fail);
 }
 
+.status-active {
+  background: var(--ok-bg);
+  color: var(--ok);
+}
+
+.status-inactive {
+  background: var(--bg);
+  color: #6b7280;
+}
+
+.trash-card,
+.admin-user-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.admin-user-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.admin-user-clients-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 6px 16px;
+}
+
+.admin-user-clients-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.admin-user-group {
+  margin-bottom: 24px;
+}
+
+.admin-user-group-heading {
+  font-size: 16px;
+  margin: 20px 0 8px;
+}
+
 .datasheet-file {
   display: flex;
   align-items: center;
@@ -546,6 +1824,32 @@ button.reject {
   font-size: 17px;
   font-weight: 700;
   color: #1a1a1a;
+}
+
+/* The "go edit this Data Sheet Template" action (TemplateEditLink.jsx) --
+   a labeled pill with an icon so it reads as a clickable secondary action
+   sitting under the primary Data Sheet file button, not a stray line of
+   plain underlined text easy to miss or misread as a label. */
+.template-edit-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  padding: 9px 16px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: white;
+  color: var(--accent-bright);
+  font-size: 13.5px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.15s ease;
+}
+
+.template-edit-link:hover {
+  border-color: var(--accent);
+  background: var(--accent-tint);
+  transform: translateY(-1px);
 }
 
 .drawing-preview {
@@ -591,6 +1895,26 @@ th {
   width: 100px;
 }
 
+.summary-table th,
+.summary-table td {
+  text-align: center;
+}
+
+.summary-table th:first-child,
+.summary-table td:first-child {
+  text-align: left;
+}
+
+.summary-qty-input {
+  width: 70px !important;
+  text-align: center;
+}
+
+.summary-notes-input {
+  width: 100%;
+  min-width: 180px;
+}
+
 .capture-table-transposed th,
 .capture-table-transposed td {
   text-align: center;
@@ -602,6 +1926,34 @@ th {
   text-align: left;
   min-width: 90px;
   white-space: nowrap;
+  /* Keeps the sample number visible while scrolling right through many
+     Find# columns -- needs an opaque background so scrolled-under columns
+     don't show through underneath it. */
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  background: white;
+}
+
+.capture-table-transposed thead th:first-child {
+  z-index: 3;
+  background: var(--table-header-bg);
+}
+
+.capture-table-transposed .spec-row td:first-child {
+  background: var(--bg);
+}
+
+.sample-row-alt td {
+  background: #fafbfc;
+}
+
+.sample-row-alt td:first-child {
+  background: #f3f5f7;
+}
+
+.sample-row:hover td {
+  background: var(--accent-tint);
 }
 
 .capture-table-transposed .spec-row td {
@@ -622,6 +1974,19 @@ th {
 }
 
 
+.check-column-cell {
+  text-align: center;
+}
+
+.check-column-cell input[type="checkbox"] {
+  width: 18px;
+  min-width: 18px;
+  height: 18px;
+  min-height: 18px;
+  padding: 0;
+  cursor: pointer;
+}
+
 .spec-input {
   text-align: center;
   font-weight: 600;
@@ -630,6 +1995,70 @@ th {
 .input-out-of-tolerance {
   border-color: var(--fail);
   background: var(--fail-bg);
+}
+
+.passfail-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.passfail-toggle {
+  display: flex;
+  gap: 4px;
+}
+
+.passfail-btn {
+  padding: 6px 10px;
+  min-height: 32px;
+  border-radius: 6px;
+  border: 1.5px solid var(--border);
+  background: white;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+  box-shadow: none;
+  cursor: pointer;
+}
+
+.passfail-btn-ok.passfail-btn-active {
+  border-color: var(--ok);
+  background: var(--ok-bg);
+  color: var(--ok);
+}
+
+.passfail-btn-not-ok.passfail-btn-active {
+  border-color: var(--fail);
+  background: var(--fail-bg);
+  color: var(--fail);
+}
+
+.passfail-reason {
+  width: 132px;
+  min-height: 32px;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.mark-all-ok-btn {
+  display: block;
+  margin: 4px auto 0;
+  padding: 0;
+  min-height: auto;
+  background: none;
+  border: none;
+  box-shadow: none;
+  color: var(--accent);
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: normal;
+  cursor: pointer;
+}
+
+.mark-all-ok-btn:hover {
+  text-decoration: underline;
 }
 
 .header-grid {
@@ -648,6 +2077,17 @@ th {
 
 .header-field input {
   width: 100%;
+}
+
+.header-field-checkbox {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  grid-column: span 2;
+}
+
+.header-field-checkbox input {
+  width: auto;
 }
 
 .table-scroll {
@@ -676,14 +2116,6 @@ th {
   margin: 16px 0;
 }
 
-.audit-log {
-  list-style: none;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  font-size: 13px;
-}
 
 .result {
   font-weight: 700;
@@ -711,6 +2143,26 @@ th {
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 32px;
+}
+
+.sheet-linked-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 28px 0 16px;
+  font-weight: 700;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.sheet-linked-divider::before,
+.sheet-linked-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border);
 }
 
 /* --- Company header --- */
@@ -890,6 +2342,10 @@ th {
   background: #eef1f6;
 }
 
+.sheet-summary-table td:nth-child(4) {
+  text-align: left;
+}
+
 .sheet-cell-fail {
   color: var(--fail);
   font-weight: 700;
@@ -985,7 +2441,11 @@ th {
     text-align: center;
   }
 
-  .nav-user {
+  .account-menu {
+    margin-left: 0;
+  }
+
+  .account-menu-name {
     display: none;
   }
 
@@ -997,6 +2457,28 @@ th {
 
   h1 {
     font-size: 21px;
+  }
+
+  .dashboard-hero {
+    padding: 24px 16px 32px;
+  }
+
+  .dashboard-hero-inner {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+  }
+
+  .role-badge {
+    margin-top: 0;
+  }
+
+  .activity-item {
+    flex-wrap: wrap;
+  }
+
+  .activity-time {
+    text-align: left;
   }
 
   .report-header {
@@ -1108,17 +2590,72 @@ th {
   background: var(--accent-tint);
 }
 
-.add-row-cell {
-  cursor: pointer;
-  text-align: center;
-  color: var(--accent);
-  font-weight: 600;
-  padding: 8px;
+.add-row-cell-container {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 8px 12px;
   border-top: 1px dashed var(--border);
 }
 
+.add-row-cell {
+  cursor: pointer;
+  color: var(--accent);
+  font-weight: 600;
+}
+
 .add-row-cell:hover {
-  background: var(--accent-tint);
+  text-decoration: underline;
+}
+
+.bulk-sample-control {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+.sample-count-input {
+  width: 64px;
+  min-height: auto;
+  padding: 4px 6px;
+  text-align: center;
+}
+
+.link-button {
+  display: inline;
+  padding: 0;
+  min-height: auto;
+  background: none;
+  border: none;
+  box-shadow: none;
+  color: var(--accent);
+  font-weight: 600;
+  font-size: inherit;
+  cursor: pointer;
+}
+
+.link-button:hover {
+  background: none;
+  text-decoration: underline;
+}
+
+.samples-collapsed-cell {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 14px 12px;
+  font-weight: 600;
+  background: var(--bg);
+}
+
+.samples-collapse-cell {
+  text-align: center;
+  padding: 6px;
 }
 
 .sheet-meta-row {

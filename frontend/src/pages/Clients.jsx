@@ -1,11 +1,32 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
+import { useAuth } from "../context/AuthContext";
 import { useConfirm } from "../hooks/useConfirm";
+import { INCOMING_ONLY_PARTS, INCOMING_ONLY_CLIENT_NAMES } from "../lib/incoming";
+import PageNav from "../components/PageNav";
 
 const MAX_RESULTS = 30;
 
+// Operators' In-Process work only ever covers these customers (see the
+// matching OPERATOR_ALLOWED_CLIENTS guard on POST /api/inspections) -- this
+// is the picker-side half, so they never see the other ~110 customers to
+// begin with instead of being blocked only after picking one.
+const OPERATOR_ALLOWED_CLIENT_NAMES = new Set([
+  "Gas Tubes",
+  "Insulet Corp",
+  "PMI",
+  "Shaw Development",
+  "Environment One",
+  "Kawasaki",
+  "Bravo",
+  "Game Scout",
+  "Noveske Rifleworks LLC",
+]);
+
 export default function Clients() {
+  const { effectiveRole } = useAuth();
+  const isOperator = effectiveRole === "operator";
   const [searchParams] = useSearchParams();
   // Carries a non-default inspection type (e.g. "in_process", from the
   // operator home screen) through to the Parts page. Absent for the normal
@@ -44,22 +65,53 @@ export default function Clients() {
     return map;
   }, [clients]);
 
+  // A client that exists purely as an Incoming Inspection categorization
+  // bucket (see INCOMING_ONLY_CLIENT_NAMES) has nothing real to inspect via
+  // Final/Set-up/In-Process -- this page is never reached from the actual
+  // /incoming flow (that goes straight from IncomingFolders.jsx to
+  // Parts.jsx), so it's safe to filter these out unconditionally here. A
+  // "double duty" client like Kawasaki or TRB, which has real manufacturing
+  // parts too, is untouched.
+  const incomingOnlyClientIds = useMemo(() => {
+    const ids = new Set();
+    clients.forEach((c) => {
+      if (INCOMING_ONLY_CLIENT_NAMES.has(c.name)) ids.add(c.id);
+    });
+    return ids;
+  }, [clients]);
+
+  const visibleClients = useMemo(() => {
+    let result = clients.filter((c) => !incomingOnlyClientIds.has(c.id));
+    if (isOperator) result = result.filter((c) => OPERATOR_ALLOWED_CLIENT_NAMES.has(c.name));
+    return result;
+  }, [clients, isOperator, incomingOnlyClientIds]);
+  const visibleClientIds = useMemo(() => new Set(visibleClients.map((c) => c.id)), [visibleClients]);
+
   // Parts land on the same next screen Parts.jsx sends them to: in_process
-  // goes to the per-part Operations list, everything else to the Data Sheet.
+  // and setup go to the per-part Operations list, everything else to the
+  // Data Sheet.
   const partHref = (id) => {
-    if (type === "in_process") return `/parts/${id}/operations`;
+    if (type === "in_process" || type === "setup") return `/parts/${id}/operations?type=${type}`;
     return type ? `/parts/${id}/inspections?type=${type}` : `/parts/${id}/inspections`;
   };
 
   const trimmedQuery = query.trim().toLowerCase();
   const matchedClients = useMemo(() => {
     if (!trimmedQuery) return [];
-    return clients.filter((c) => c.name.toLowerCase().includes(trimmedQuery));
-  }, [clients, trimmedQuery]);
+    return visibleClients.filter((c) => c.name.toLowerCase().includes(trimmedQuery));
+  }, [visibleClients, trimmedQuery]);
   const matchedParts = useMemo(() => {
     if (!trimmedQuery) return [];
-    return allParts.filter((p) => p.part_number.toLowerCase().includes(trimmedQuery));
-  }, [allParts, trimmedQuery]);
+    // visibleClientIds already excludes pure-Incoming-only clients (and,
+    // for an operator, applies their customer allowlist too) -- applied
+    // for everyone now, not just operators, so a QC search for a raw
+    // material or subcomponent part number doesn't surface a client that
+    // isn't even shown in the list above.
+    return allParts
+      .filter((p) => visibleClientIds.has(p.client_id))
+      .filter((p) => !INCOMING_ONLY_PARTS.has(`${clientNameById.get(p.client_id)}:${p.part_number}`))
+      .filter((p) => p.part_number.toLowerCase().includes(trimmedQuery));
+  }, [allParts, trimmedQuery, visibleClientIds, clientNameById]);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -125,6 +177,7 @@ export default function Clients() {
 
   return (
     <div className="page">
+      <PageNav backTo="/" backLabel="Back to Home" items={[{ label: "Home", to: "/" }, { label: "Customers" }]} />
       <h1>Customers</h1>
 
       <div className="search-bar">
@@ -140,14 +193,16 @@ export default function Clients() {
         />
       </div>
 
-      <form className="inline-form" onSubmit={handleSubmit}>
-        <input
-          placeholder="Customer name"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-        />
-        <button type="submit">Add customer</button>
-      </form>
+      {!isOperator && (
+        <form className="inline-form" onSubmit={handleSubmit}>
+          <input
+            placeholder="Customer name"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+          />
+          <button type="submit">Add customer</button>
+        </form>
+      )}
 
       {error && <p className="error">{error}</p>}
 
@@ -192,13 +247,13 @@ export default function Clients() {
         </div>
       ) : (
         <>
-          <p className="muted">Right-click a customer to rename or delete it.</p>
+          {!isOperator && <p className="muted">Right-click a customer to rename or delete it.</p>}
           {loading ? (
             <p>Loading...</p>
           ) : (
             <ul className="card-list">
-              {clients.map((c) => (
-                <li key={c.id} className="card" onContextMenu={(e) => handleContextMenu(e, c)}>
+              {visibleClients.map((c) => (
+                <li key={c.id} className="card" onContextMenu={isOperator ? undefined : (e) => handleContextMenu(e, c)}>
                   {renamingId === c.id ? (
                     <input
                       autoFocus
@@ -223,7 +278,7 @@ export default function Clients() {
                   )}
                 </li>
               ))}
-              {clients.length === 0 && <p className="muted">No customers yet.</p>}
+              {visibleClients.length === 0 && <p className="muted">No customers yet.</p>}
             </ul>
           )}
         </>

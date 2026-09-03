@@ -1,12 +1,38 @@
 const express = require("express");
 const db = require("../db");
 const { generateInspectionPdf } = require("../pdf/inspectionSheet");
-const { recordAudit } = require("../lib/audit");
+const { recordAudit, recordHeaderAudit, recordMeasurementsAudit } = require("../lib/audit");
 const { signInspectionStatus } = require("../lib/inspectionSigning");
+const { parsePassFailState } = require("../lib/passfail");
 const attachRole = require("../middleware/attachRole");
 const requireRole = require("../middleware/requireRole");
 
 const router = express.Router();
+
+// Operators only ever do In-Process (see CLAUDE.md) -- everyone else
+// (qc/admin/engineer) is unrestricted by type here. Used on create and on
+// every edit to an existing inspection, keyed off that inspection's own
+// (immutable) type rather than anything client-supplied.
+function canAccessType(role, type) {
+  if (role === "operator") return type === "in_process";
+  return true;
+}
+
+// Operators' In-Process work only ever covers these customers (confirmed by
+// QC) -- checked on create only, not on edits to already-existing Data
+// Sheets, so this doesn't retroactively lock anyone out of in-progress work
+// that predates the restriction.
+const OPERATOR_ALLOWED_CLIENTS = new Set([
+  "Gas Tubes",
+  "Insulet Corp",
+  "PMI",
+  "Shaw Development",
+  "Environment One",
+  "Kawasaki",
+  "Bravo",
+  "Game Scout",
+  "Noveske Rifleworks LLC",
+]);
 
 const HEADER_FIELDS = [
   "customer",
@@ -21,7 +47,42 @@ const HEADER_FIELDS = [
   "sampling_plan_n",
   "sampling_plan_c",
   "notes",
+  "requires_in_process",
+  "hundred_percent_inspection",
 ];
+
+// Booleans stored as 0/1 INTEGER columns -- special-cased on every read of
+// req.body for these fields (POST's columns mapping and PUT's normalize
+// step below) since better-sqlite3 can't bind a raw JS boolean, and a plain
+// `?? null` would violate their NOT NULL constraint when omitted on create.
+const BOOLEAN_HEADER_FIELDS = ["requires_in_process", "hundred_percent_inspection"];
+
+// Final Inspection's "Operator In-Process Data Sheet required" gate (see PUT
+// /:id/status): satisfied by any in_process inspection on the same part that
+// actually has recorded work -- either real measurements rows, or (for a
+// hundred_percent_inspection) a point-summary tally with a non-zero qty
+// inspected. An empty auto-provisioned row with neither doesn't count as
+// "the operator did their check". Scoped to the same WO#/Job# when the Final
+// Inspection has one, since that's the specific production run being signed
+// off; falls back to "any WO# for this part" when it doesn't.
+function hasQualifyingInProcess(partId, jobNumber) {
+  const jobFilter = jobNumber && jobNumber.trim() ? "AND ip.job_number = @jobNumber" : "";
+  const row = db
+    .prepare(
+      `SELECT EXISTS(
+         SELECT 1 FROM inspections ip
+         WHERE ip.part_id = @partId
+           AND ip.type = 'in_process'
+           ${jobFilter}
+           AND (
+             EXISTS (SELECT 1 FROM measurements m WHERE m.inspection_id = ip.id)
+             OR EXISTS (SELECT 1 FROM inspection_point_summaries ips WHERE ips.inspection_id = ip.id AND ips.qty_inspected > 0)
+           )
+       ) AS found`
+    )
+    .get({ partId, jobNumber: jobNumber || null });
+  return !!row.found;
+}
 
 // Supports one-sided specs (max-only = "must not exceed", min-only = "must be at
 // least") as well as two-sided tolerance bands. Returns null when neither bound
@@ -39,9 +100,9 @@ function computeWithinTolerance(point, measuredValue) {
   return 1;
 }
 
-// GET /api/inspections?part_id=1&type=final&client_id=1&status=approved&date_from=2026-01-01&date_to=2026-12-31&operation_id=1
+// GET /api/inspections?part_id=1&type=final&client_id=1&status=approved&date_from=2026-01-01&date_to=2026-12-31&operation_id=1&job_number=12345
 router.get("/", (req, res) => {
-  const { part_id, type, client_id, status, date_from, date_to, operation_id } = req.query;
+  const { part_id, type, client_id, status, date_from, date_to, operation_id, job_number } = req.query;
 
   let query = `
     SELECT i.*, p.part_number, p.client_id, c.name AS client_name
@@ -67,6 +128,14 @@ router.get("/", (req, res) => {
   if (client_id) {
     query += " AND p.client_id = ?";
     params.push(client_id);
+  }
+  // Partial, case-insensitive match -- a WO# lookup across every customer,
+  // part, and inspection type (Final/Set-up/In-Process/Incoming all write to
+  // the same job_number column), so an inspector doesn't need to remember
+  // the exact formatting or which part it was recorded under.
+  if (job_number) {
+    query += " AND i.job_number LIKE ? COLLATE NOCASE";
+    params.push(`%${job_number}%`);
   }
   // 'conditionally_approved' isn't a real i.status value (see PUT
   // /:id/status) -- it's status='approved' with a reason attached, so the
@@ -119,6 +188,235 @@ router.get("/status-lookup", attachRole, requireRole("operator", "qc", "admin"),
   res.json(db.prepare(query).all(...params));
 });
 
+// GET /api/inspections/dashboard-stats?mine=1&type=in_process
+// Home screen's live stats strip + recent-activity feed. mine=1 scopes
+// everything to the logged-in user's own created_by (used by the Operator
+// dashboard, mirroring status-lookup's per-operator scoping above) --
+// omitted for the QC/Admin dashboard, which is company-wide across every
+// inspector and inspection type.
+router.get("/dashboard-stats", (req, res) => {
+  const { mine, type } = req.query;
+
+  const scope = [];
+  const params = [];
+  if (mine) {
+    scope.push("i.created_by = ?");
+    params.push(req.user.id);
+  }
+  if (type) {
+    scope.push("i.type = ?");
+    params.push(type);
+  }
+  const where = scope.length ? `AND ${scope.join(" AND ")}` : "";
+
+  const openCount = db
+    .prepare(`SELECT COUNT(*) AS n FROM inspections i WHERE i.status = 'in_progress' ${where}`)
+    .get(...params).n;
+
+  const approvedCount = db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM signatures s JOIN inspections i ON i.id = s.inspection_id
+       WHERE s.action = 'approved' AND s.signed_at >= datetime('now', '-7 days') ${where}`
+    )
+    .get(...params).n;
+
+  const rejectedCount = db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM signatures s JOIN inspections i ON i.id = s.inspection_id
+       WHERE s.action = 'rejected' AND s.signed_at >= datetime('now', '-7 days') ${where}`
+    )
+    .get(...params).n;
+
+  // Signature events (not audit_log generally) -- these are the meaningful
+  // "outcome" moments an inspector cares about at a glance, each with an
+  // exact signed_at timestamp already.
+  const recentActivity = db
+    .prepare(
+      `SELECT s.action, s.signed_at AS at, i.id AS inspection_id, i.type, i.job_number,
+              p.part_number, c.name AS client_name
+       FROM signatures s
+       JOIN inspections i ON i.id = s.inspection_id
+       JOIN parts p ON p.id = i.part_id
+       JOIN clients c ON c.id = p.client_id
+       WHERE 1 = 1 ${where}
+       ORDER BY s.signed_at DESC
+       LIMIT 6`
+    )
+    .all(...params);
+
+  res.json({ openCount, approvedCount, rejectedCount, recentActivity });
+});
+
+// GET /api/inspections/analytics -- the Engineer dashboard's charts.
+// Company-wide only (no mine=1 scoping like dashboard-stats above) since
+// trend/tolerance analysis across parts doesn't make sense scoped to one
+// operator's own work.
+router.get("/analytics", attachRole, requireRole("qc", "admin", "engineer"), (req, res) => {
+  // Zero-filled so the trend line has a real point for every day in the
+  // window, not just the days something happened to be dated to.
+  const volumeRows = db
+    .prepare(
+      `SELECT date(date) AS day, COUNT(*) AS c FROM inspections
+       WHERE date >= date('now', '-30 days')
+       GROUP BY day`
+    )
+    .all();
+  const volumeByDayMap = new Map(volumeRows.map((r) => [r.day, r.c]));
+  const volumeByDay = [];
+  for (let i = 29; i >= 0; i--) {
+    const day = new Date(Date.now() - i * 86400000).toISOString().slice(0, 10);
+    volumeByDay.push({ date: day, count: volumeByDayMap.get(day) || 0 });
+  }
+
+  // Same "conditionally approved = approved + a real conditional_reason"
+  // rule frontend/src/lib/format.js's resultStatus() applies client-side,
+  // mirrored here in SQL so the two never drift apart.
+  const statusRows = db
+    .prepare(
+      `SELECT
+         CASE
+           WHEN status = 'approved' AND conditional_reason IS NOT NULL AND conditional_reason != ''
+             THEN 'conditionally_approved'
+           ELSE status
+         END AS bucket,
+         COUNT(*) AS c
+       FROM inspections
+       GROUP BY bucket`
+    )
+    .all();
+  const statusBreakdown = { in_progress: 0, approved: 0, conditionally_approved: 0, rejected: 0 };
+  statusRows.forEach((r) => {
+    if (r.bucket in statusBreakdown) statusBreakdown[r.bucket] = r.c;
+  });
+
+  // Pass/fail across EVERY filled-in measurement, numeric or specless --
+  // not all Data Sheets have real numeric readings; a specless (Fixture/
+  // Visual-style) column stores "OK"/"NOT OK ..." text instead, with
+  // within_tolerance always null for those (nothing numeric to compare --
+  // see computeWithinTolerance above). Treating a "NOT OK" the same as a
+  // numeric out-of-tolerance reading is what makes this dashboard reflect
+  // the majority of what's actually recorded, not just the numeric slice.
+  // One pass over every non-blank row builds all three of tolerance /
+  // topOutOfTolerance / needsAttention together, since they're the same
+  // classification sliced three ways.
+  const allMeasurements = db
+    .prepare(
+      `SELECT m.id AS measurement_id, m.measured_value, m.within_tolerance, i.date,
+              bp.id AS balloon_point_id, bp.balloon_number, bp.max_spec, bp.min_spec,
+              p.id AS part_id, p.part_number, p.client_id, c.name AS client_name
+       FROM measurements m
+       JOIN balloon_points bp ON bp.id = m.balloon_point_id
+       JOIN balloon_drawings d ON d.id = bp.drawing_id
+       JOIN parts p ON p.id = d.part_id
+       JOIN clients c ON c.id = p.client_id
+       JOIN inspections i ON i.id = m.inspection_id
+       WHERE m.measured_value IS NOT NULL
+       ORDER BY i.date DESC`
+    )
+    .all();
+  const dismissedIds = new Set(db.prepare("SELECT measurement_id FROM dismissed_alerts").all().map((r) => r.measurement_id));
+
+  const classify = (row) => {
+    if (row.within_tolerance != null) return row.within_tolerance ? "pass" : "fail";
+    const state = parsePassFailState(row.measured_value);
+    return state === "ok" ? "pass" : state === "not_ok" ? "fail" : null;
+  };
+
+  let within = 0;
+  let outOf = 0;
+  const failsByPoint = new Map(); // balloon_point_id -> { count, balloon_number, part_number, client_name }
+  // The all-time tally above intentionally counts every reading ever taken.
+  // needsAttention is different: it should only list a point if its LATEST
+  // reading (not just its latest FAILING one) is currently a fail -- a
+  // point that failed yesterday but has since been re-measured and passed
+  // must drop off on its own, not linger forever just because a failure
+  // happened at some point in its history. allMeasurements is already
+  // date-DESC, so the first row seen per point is that point's latest.
+  const latestByPoint = new Map();
+
+  allMeasurements.forEach((row) => {
+    const outcome = classify(row);
+    if (outcome == null) return; // free text that predates the OK/Not-OK convention
+
+    if (outcome === "pass") within += 1;
+    else outOf += 1;
+
+    if (outcome === "fail") {
+      const existing = failsByPoint.get(row.balloon_point_id);
+      if (existing) existing.count += 1;
+      else
+        failsByPoint.set(row.balloon_point_id, {
+          count: 1,
+          balloon_number: row.balloon_number,
+          part_number: row.part_number,
+          client_name: row.client_name,
+        });
+    }
+
+    if (!latestByPoint.has(row.balloon_point_id)) latestByPoint.set(row.balloon_point_id, row);
+  });
+
+  const needsAttention = [...latestByPoint.values()]
+    .filter((row) => classify(row) === "fail" && !dismissedIds.has(row.measurement_id))
+    .sort((a, b) => (a.date < b.date ? 1 : -1))
+    .slice(0, 10)
+    .map((row) => ({
+      measurement_id: row.measurement_id,
+      balloon_point_id: row.balloon_point_id,
+      balloon_number: row.balloon_number,
+      measured_value: row.measured_value,
+      max_spec: row.max_spec,
+      min_spec: row.min_spec,
+      date: row.date,
+      part_id: row.part_id,
+      part_number: row.part_number,
+      client_id: row.client_id,
+      client_name: row.client_name,
+    }));
+
+  // Pareto ranking -- cumulativePct is relative to the TRUE total of every
+  // failing point (not just the top 10 shown), so it correctly approaches
+  // 100% as more of the long tail would be included, rather than capping
+  // artificially low if there are more than 10 distinct failing points.
+  const allFails = [...failsByPoint.values()].sort((a, b) => b.count - a.count);
+  const totalFails = allFails.reduce((sum, f) => sum + f.count, 0);
+  let runningFails = 0;
+  const topOutOfTolerance = allFails.slice(0, 10).map((f) => {
+    runningFails += f.count;
+    return {
+      ...f,
+      pct: totalFails > 0 ? Math.round((f.count / totalFails) * 1000) / 10 : 0,
+      cumulativePct: totalFails > 0 ? Math.round((runningFails / totalFails) * 1000) / 10 : 0,
+    };
+  });
+
+  res.json({
+    volumeByDay,
+    statusBreakdown,
+    tolerance: { within, outOf },
+    topOutOfTolerance,
+    needsAttention,
+  });
+});
+
+// POST /api/inspections/analytics/dismiss-alert  { measurement_id } -- an
+// engineer manually acknowledging one Needs Attention row (see
+// dismissed_alerts in schema.sql for why this is keyed by measurement_id,
+// not balloon_point_id: a newer measurement on the same point naturally
+// supersedes the dismissal instead of needing it cleared by hand).
+router.post("/analytics/dismiss-alert", attachRole, requireRole("qc", "admin", "engineer"), (req, res) => {
+  const { measurement_id } = req.body;
+  if (!measurement_id) return res.status(400).json({ error: "measurement_id is required" });
+  if (!db.prepare("SELECT 1 FROM measurements WHERE id = ?").get(measurement_id)) {
+    return res.status(404).json({ error: "Measurement not found" });
+  }
+  db.prepare("INSERT OR IGNORE INTO dismissed_alerts (measurement_id, dismissed_by) VALUES (?, ?)").run(
+    measurement_id,
+    req.user.id
+  );
+  res.status(204).send();
+});
+
 function getInspectionDetail(id) {
   const inspection = db
     .prepare(
@@ -139,6 +437,20 @@ function getInspectionDetail(id) {
        JOIN balloon_points bp ON bp.id = m.balloon_point_id
        WHERE m.inspection_id = ?
        ORDER BY bp.sort_order, m.sample_number`
+    )
+    .all(id);
+
+  // hundred_percent_inspection's per-column tallies (see schema.sql) --
+  // parallel to `measurements` above, one row per Find# instead of one per
+  // sample. Harmless to fetch even when the inspection isn't in that mode;
+  // it'll just always be empty.
+  const pointSummaries = db
+    .prepare(
+      `SELECT ips.*, bp.balloon_number, bp.sort_order
+       FROM inspection_point_summaries ips
+       JOIN balloon_points bp ON bp.id = ips.balloon_point_id
+       WHERE ips.inspection_id = ?
+       ORDER BY bp.sort_order`
     )
     .all(id);
 
@@ -164,7 +476,27 @@ function getInspectionDetail(id) {
     )
     .get(id);
 
-  return { ...inspection, measurements, points, signature: signature || null };
+  // When this Final Inspection requires an Operator In-Process Data Sheet
+  // (see requires_in_process / hasQualifyingInProcess), the printed record
+  // bundles that companion sheet in too, not just a "yes it exists" check --
+  // same part, same WO#/Job# when this one has it (else any WO# for the
+  // part, matching hasQualifyingInProcess's own fallback), preferring a
+  // signed one and the most recent if more than one matches.
+  let linkedInProcess = null;
+  if (inspection.type === "final" && inspection.requires_in_process) {
+    const jobFilter = inspection.job_number && inspection.job_number.trim() ? "AND ip.job_number = @jobNumber" : "";
+    const linked = db
+      .prepare(
+        `SELECT ip.id FROM inspections ip
+         WHERE ip.part_id = @partId AND ip.type = 'in_process' ${jobFilter}
+         ORDER BY (ip.status = 'approved') DESC, ip.date DESC, ip.id DESC
+         LIMIT 1`
+      )
+      .get({ partId: inspection.part_id, jobNumber: inspection.job_number || null });
+    if (linked) linkedInProcess = getInspectionDetail(linked.id);
+  }
+
+  return { ...inspection, measurements, pointSummaries, points, signature: signature || null, linkedInProcess };
 }
 
 // GET /api/inspections/:id  (includes measurements + specs for each balloon)
@@ -204,17 +536,40 @@ router.get("/:id/audit", (req, res) => {
 // other's): if one is already open it's resumed instead of creating a
 // duplicate. Once a Data Sheet is signed (approved/rejected) it's locked
 // history, and the next click starts a new one.
-router.post("/", (req, res) => {
+router.post("/", attachRole, (req, res) => {
   const { drawing_id, type } = req.body;
   let { part_id, operation_id } = req.body;
   if (!type) return res.status(400).json({ error: "type is required" });
+  if (!canAccessType(req.user.role, type)) {
+    return res.status(403).json({ error: "Operators can only create or edit In-Process Data Sheets." });
+  }
 
   if (operation_id) {
     // Never trust a client-supplied part_id when operation_id is set --
     // resolve it from the operation itself, so the two can't mismatch (same
     // pattern as POST /api/drawings).
-    const operation = db.prepare("SELECT part_id FROM operations WHERE id = ?").get(operation_id);
+    const operation = db.prepare("SELECT part_id, scope FROM operations WHERE id = ?").get(operation_id);
     if (!operation) return res.status(404).json({ error: "Operation not found" });
+    // Set-up, the Operator's In-Process list, and QC's own separate
+    // In-Process list are three independent operation lists (see schema.sql's
+    // operations.scope comment) -- the UI only ever offers the matching one,
+    // this is the API-level backstop against an operation_id from the wrong
+    // list being used to create an inspection.
+    if (type === "setup" && operation.scope !== "setup") {
+      return res.status(400).json({ error: "This operation isn't in the Set-up list." });
+    }
+    if (type === "in_process") {
+      if (!["in_process_operator", "in_process_qc"].includes(operation.scope)) {
+        return res.status(400).json({ error: "This operation isn't in an In-Process list." });
+      }
+      // A genuine Operator account may only use the Operator's own list, not
+      // QC's -- QC/Engineer/Admin may use either. Can't be tightened further
+      // for an admin previewing "View as Operator", since that's a
+      // frontend-only preview and req.user.role is still their real role here.
+      if (req.user.role === "operator" && operation.scope !== "in_process_operator") {
+        return res.status(400).json({ error: "This operation isn't in the Operator's In-Process list." });
+      }
+    }
     part_id = operation.part_id;
   } else if (!part_id) {
     return res.status(400).json({ error: "part_id is required (or operation_id)" });
@@ -233,6 +588,19 @@ router.post("/", (req, res) => {
     .prepare(`SELECT p.*, c.name AS client_name FROM parts p JOIN clients c ON c.id = p.client_id WHERE p.id = ?`)
     .get(part_id);
   if (!part) return res.status(404).json({ error: "Part not found" });
+  if (req.user.role === "operator" && !OPERATOR_ALLOWED_CLIENTS.has(part.client_name)) {
+    return res.status(403).json({ error: "Operators can only start In-Process Data Sheets for Gas Tubes, Insulet Corp, PMI, Shaw Development, Environment One, Kawasaki, Bravo, Game Scout, or Noveske Rifleworks LLC." });
+  }
+
+  // hundred_percent_inspection is set once at template setup (see PUT
+  // /api/drawings/:id), not per-inspection -- every new Data Sheet created
+  // against this drawing inherits it, same as it inherits the Find# columns
+  // themselves. Copied onto the inspection row (not read live via a join
+  // later) so an already-created Data Sheet keeps whatever was true when it
+  // was started, even if the template's setting changes afterward.
+  const drawingDefaults = drawing_id
+    ? db.prepare("SELECT hundred_percent_inspection FROM balloon_drawings WHERE id = ?").get(drawing_id)
+    : null;
 
   const columns = ["part_id", "drawing_id", "type", "operation_id", "created_by", "updated_by", ...HEADER_FIELDS];
   const values = [
@@ -245,7 +613,21 @@ router.post("/", (req, res) => {
     // "customer" defaults to the customer folder this part lives under —
     // still just a free-text field afterward, in case the paper form's
     // customer ever needs to differ from the client record (e.g. drop-ship).
-    ...HEADER_FIELDS.map((f) => (f === "customer" ? req.body.customer ?? part.client_name : req.body[f] ?? null)),
+    ...HEADER_FIELDS.map((f) => {
+      if (f === "customer") return req.body.customer ?? part.client_name;
+      if (f === "hundred_percent_inspection") {
+        return req.body.hundred_percent_inspection !== undefined
+          ? req.body.hundred_percent_inspection
+            ? 1
+            : 0
+          : drawingDefaults?.hundred_percent_inspection
+            ? 1
+            : 0;
+      }
+      // NOT NULL columns -- always resolve to a concrete 0/1, never null.
+      if (BOOLEAN_HEADER_FIELDS.includes(f)) return req.body[f] ? 1 : 0;
+      return req.body[f] ?? null;
+    }),
   ];
 
   const result = db
@@ -263,9 +645,12 @@ router.post("/", (req, res) => {
 // PUT /api/inspections/:id  (updates header fields: customer, heat, quantity, supplier,
 // po_number, customer_po_number, operation, job_number, inspector, sampling plan,
 // lot_disposition, notes, date)
-router.put("/:id", (req, res) => {
+router.put("/:id", attachRole, (req, res) => {
   const existing = db.prepare("SELECT * FROM inspections WHERE id = ?").get(req.params.id);
   if (!existing) return res.status(404).json({ error: "Inspection not found" });
+  if (!canAccessType(req.user.role, existing.type)) {
+    return res.status(403).json({ error: "Operators can only create or edit In-Process Data Sheets." });
+  }
   if (existing.status !== "in_progress") {
     return res.status(409).json({ error: "This Data Sheet has been signed and can no longer be edited." });
   }
@@ -275,6 +660,12 @@ router.put("/:id", (req, res) => {
   // HEADER_FIELDS since that list is also used by POST, where "date" should
   // never be forced to NULL just because the client didn't send one.
   const fields = [...HEADER_FIELDS, "date"];
+
+  // Normalize to 0/1 only when actually sent, so an omitted field still falls
+  // through the COALESCE below as "leave it alone" (undefined), not "clear it".
+  BOOLEAN_HEADER_FIELDS.forEach((f) => {
+    if (req.body[f] !== undefined) req.body[f] = req.body[f] ? 1 : 0;
+  });
 
   const changes = {};
   fields.forEach((f) => {
@@ -292,7 +683,7 @@ router.put("/:id", (req, res) => {
   db.prepare(`UPDATE inspections SET ${setClauses}, updated_by = @updated_by WHERE id = @id`).run(values);
 
   if (Object.keys(changes).length > 0) {
-    recordAudit("inspection", req.params.id, "header_updated", req.user.id, changes);
+    recordHeaderAudit("inspection", req.params.id, req.user.id, changes);
   }
 
   res.json(db.prepare("SELECT * FROM inspections WHERE id = ?").get(req.params.id));
@@ -300,9 +691,12 @@ router.put("/:id", (req, res) => {
 
 // PUT /api/inspections/:id/measurements  (saves/updates measurements in batch)
 // body: { measurements: [{ balloon_point_id, sample_number, measured_value }, ...] }
-router.put("/:id/measurements", (req, res) => {
-  const inspection = db.prepare("SELECT status FROM inspections WHERE id = ?").get(req.params.id);
+router.put("/:id/measurements", attachRole, (req, res) => {
+  const inspection = db.prepare("SELECT status, type FROM inspections WHERE id = ?").get(req.params.id);
   if (!inspection) return res.status(404).json({ error: "Inspection not found" });
+  if (!canAccessType(req.user.role, inspection.type)) {
+    return res.status(403).json({ error: "Operators can only create or edit In-Process Data Sheets." });
+  }
   if (inspection.status !== "in_progress") {
     return res.status(409).json({ error: "This Data Sheet has been signed and can no longer be edited." });
   }
@@ -354,7 +748,7 @@ router.put("/:id/measurements", (req, res) => {
   tx(measurements);
 
   if (changes.length > 0) {
-    recordAudit("inspection", req.params.id, "measurements_saved", req.user.id, { changes });
+    recordMeasurementsAudit("inspection", req.params.id, req.user.id, changes);
   }
 
   const updated = db
@@ -368,10 +762,65 @@ router.put("/:id/measurements", (req, res) => {
   res.json(updated);
 });
 
-// DELETE /api/inspections/:id/measurements/:sampleNumber  (removes one sample row)
-router.delete("/:id/measurements/:sampleNumber", (req, res) => {
-  const inspection = db.prepare("SELECT status FROM inspections WHERE id = ?").get(req.params.id);
+// PUT /api/inspections/:id/point-summaries  (100%-inspection tallies -- one row
+// per Find# instead of one measurements row per sample; see schema.sql)
+// body: { summaries: [{ balloon_point_id, qty_inspected, qty_rejected, reject_notes }, ...] }
+router.put("/:id/point-summaries", attachRole, (req, res) => {
+  const inspection = db.prepare("SELECT status, type FROM inspections WHERE id = ?").get(req.params.id);
   if (!inspection) return res.status(404).json({ error: "Inspection not found" });
+  if (!canAccessType(req.user.role, inspection.type)) {
+    return res.status(403).json({ error: "Operators can only create or edit In-Process Data Sheets." });
+  }
+  if (inspection.status !== "in_progress") {
+    return res.status(409).json({ error: "This Data Sheet has been signed and can no longer be edited." });
+  }
+
+  const { summaries } = req.body;
+  if (!Array.isArray(summaries)) return res.status(400).json({ error: "summaries must be an array" });
+
+  const upsert = db.prepare(`
+    INSERT INTO inspection_point_summaries (inspection_id, balloon_point_id, qty_inspected, qty_rejected, reject_notes)
+    VALUES (@inspection_id, @balloon_point_id, @qty_inspected, @qty_rejected, @reject_notes)
+    ON CONFLICT(inspection_id, balloon_point_id)
+    DO UPDATE SET qty_inspected = excluded.qty_inspected, qty_rejected = excluded.qty_rejected,
+      reject_notes = excluded.reject_notes
+  `);
+
+  const tx = db.transaction((items) => {
+    for (const item of items) {
+      upsert.run({
+        inspection_id: req.params.id,
+        balloon_point_id: item.balloon_point_id,
+        qty_inspected: Number(item.qty_inspected) || 0,
+        qty_rejected: Number(item.qty_rejected) || 0,
+        reject_notes: item.reject_notes || null,
+      });
+    }
+  });
+  tx(summaries);
+
+  recordAudit("inspection", req.params.id, "point_summaries_saved", req.user.id, {
+    points: summaries.map((s) => s.balloon_point_id),
+  });
+
+  const updated = db
+    .prepare(
+      `SELECT ips.*, bp.balloon_number FROM inspection_point_summaries ips
+       JOIN balloon_points bp ON bp.id = ips.balloon_point_id
+       WHERE ips.inspection_id = ? ORDER BY bp.sort_order`
+    )
+    .all(req.params.id);
+
+  res.json(updated);
+});
+
+// DELETE /api/inspections/:id/measurements/:sampleNumber  (removes one sample row)
+router.delete("/:id/measurements/:sampleNumber", attachRole, (req, res) => {
+  const inspection = db.prepare("SELECT status, type FROM inspections WHERE id = ?").get(req.params.id);
+  if (!inspection) return res.status(404).json({ error: "Inspection not found" });
+  if (!canAccessType(req.user.role, inspection.type)) {
+    return res.status(403).json({ error: "Operators can only create or edit In-Process Data Sheets." });
+  }
   if (inspection.status !== "in_progress") {
     return res.status(409).json({ error: "This Data Sheet has been signed and can no longer be edited." });
   }
@@ -402,10 +851,26 @@ router.put("/:id/status", attachRole, requireRole("qc", "admin"), (req, res) => 
     return res.status(400).json({ error: "reason is required to conditionally approve this Data Sheet" });
   }
 
-  const existing = db.prepare("SELECT status, inspector FROM inspections WHERE id = ?").get(req.params.id);
+  const existing = db
+    .prepare("SELECT status, inspector, type, part_id, job_number, requires_in_process FROM inspections WHERE id = ?")
+    .get(req.params.id);
   if (!existing) return res.status(404).json({ error: "Inspection not found" });
   if (existing.status !== "in_progress") {
     return res.status(409).json({ error: "This Data Sheet has already been signed." });
+  }
+
+  // The "Operator In-Process Data Sheet required" gate only blocks an actual
+  // pass (plain or conditional) -- QC can always reject a part regardless,
+  // since that isn't claiming the in-process check happened.
+  if (status !== "rejected" && existing.type === "final" && existing.requires_in_process) {
+    if (!hasQualifyingInProcess(existing.part_id, existing.job_number)) {
+      return res.status(409).json({
+        error:
+          "This Final Inspection is marked as requiring an Operator In-Process Data Sheet, but none has been recorded yet for this part" +
+          (existing.job_number ? ` and WO# ${existing.job_number}` : "") +
+          ".",
+      });
+    }
   }
 
   if (!existing.inspector || !existing.inspector.trim()) {

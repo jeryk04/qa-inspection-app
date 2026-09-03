@@ -19,7 +19,7 @@ router.get("/:id", (req, res) => {
 });
 
 // POST /api/clients
-router.post("/", (req, res) => {
+router.post("/", attachRole, requireRole("qc", "admin"), (req, res) => {
   const { name } = req.body;
   if (!name) return res.status(400).json({ error: "name is required" });
 
@@ -30,7 +30,7 @@ router.post("/", (req, res) => {
 });
 
 // PUT /api/clients/:id
-router.put("/:id", (req, res) => {
+router.put("/:id", attachRole, requireRole("qc", "admin"), (req, res) => {
   const { name } = req.body;
   const result = db
     .prepare("UPDATE clients SET name = COALESCE(?, name) WHERE id = ?")

@@ -1,8 +1,9 @@
-import { useState } from "react";
 import { BrowserRouter, Routes, Route, Navigate, Link, useLocation, useNavigate } from "react-router-dom";
 import { AuthProvider, useAuth } from "./context/AuthContext";
+import AccountMenu from "./components/AccountMenu";
 import Home from "./pages/Home";
 import Login from "./pages/Login";
+import ChangePassword from "./pages/ChangePassword";
 import Clients from "./pages/Clients";
 import Parts from "./pages/Parts";
 import Inspections from "./pages/Inspections";
@@ -13,6 +14,10 @@ import InspectionCapture from "./pages/InspectionCapture";
 import InspectionSheet from "./pages/InspectionSheet";
 import InspectionHistory from "./pages/InspectionHistory";
 import StatusLookup from "./pages/StatusLookup";
+import IncomingInspection from "./pages/IncomingInspection";
+import IncomingFolders from "./pages/IncomingFolders";
+import AdminTrash from "./pages/AdminTrash";
+import AdminUsers from "./pages/AdminUsers";
 import "./App.css";
 
 function RequireAuth({ children }) {
@@ -29,22 +34,44 @@ function RequireAuth({ children }) {
   if (!user) {
     return <Navigate to="/login" state={{ from: location.pathname }} replace />;
   }
+  // Bulk-imported and admin-created accounts start on a temporary password
+  // (see db.js's migration / admin.js) -- block every other route until it's
+  // changed, the same way an unauthenticated user is blocked until they log
+  // in. Checked here, once, rather than in every page, since every
+  // authenticated route already goes through this wrapper.
+  if (user.must_change_password && location.pathname !== "/change-password") {
+    return <Navigate to="/change-password" replace />;
+  }
+  return children;
+}
+
+function RequireAdmin({ children }) {
+  const { user, loading } = useAuth();
+  if (loading) return null;
+  if (user?.role !== "admin") return <Navigate to="/" replace />;
   return children;
 }
 
 function AppShell() {
-  const { user, logout } = useAuth();
+  // adminView/effectiveRole live in AuthContext (not local state) so every
+  // page -- not just this header's nav -- can tell whether an admin is
+  // currently previewing another role. Not persisted: a refresh resets it,
+  // so admin always lands back on AdminMenu.
+  const { user, logout, viewAs: adminView, setViewAs: setAdminView, effectiveRole } = useAuth();
   const navigate = useNavigate();
-  // Which role experience an admin is currently viewing -- null shows
-  // AdminMenu. Lives here (not in Home) so the header's "Switch view"
-  // control can reset it too. Not persisted: a refresh resets AppShell's
-  // state, so admin always lands back on AdminMenu.
-  const [adminView, setAdminView] = useState(null);
 
-  const switchView = () => {
-    setAdminView(null);
+  // Applies a new preview selection (or null, back to Admin's own view) and
+  // jumps home so the picked role's Home screen shows immediately.
+  const selectView = (role) => {
+    setAdminView(role);
     navigate("/");
   };
+
+  // Customers/History are the QC-oriented company-wide pickers -- Operators
+  // only ever do In-Process (see CLAUDE.md), reached from Operator Home's
+  // own cards instead, so linking there would just dead-end them at flows
+  // (Final Inspection, company-wide history) they can't act on.
+  const isOperatorView = effectiveRole === "operator";
 
   return (
     <>
@@ -54,23 +81,28 @@ function AppShell() {
         </Link>
         {user && (
           <nav className="main-nav">
-            <Link to="/clients">Customers</Link>
-            <Link to="/history">History</Link>
-            {user.role === "admin" && adminView && (
-              <button className="secondary-btn" onClick={switchView}>
-                Switch view
-              </button>
-            )}
-            <span className="nav-user">{user.full_name}</span>
-            <button className="secondary-btn" onClick={() => logout()}>
-              Logout
-            </button>
+            {!isOperatorView && <Link to="/clients">Customers</Link>}
+            {!isOperatorView && <Link to="/history">History</Link>}
+            <AccountMenu
+              user={user}
+              viewAs={adminView}
+              onSelectView={selectView}
+              onLogout={() => logout()}
+            />
           </nav>
         )}
       </header>
       <main>
         <Routes>
           <Route path="/login" element={<Login />} />
+          <Route
+            path="/change-password"
+            element={
+              <RequireAuth>
+                <ChangePassword forced={!!user?.must_change_password} />
+              </RequireAuth>
+            }
+          />
           <Route
             path="/"
             element={
@@ -156,6 +188,42 @@ function AppShell() {
             element={
               <RequireAuth>
                 <StatusLookup />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/incoming"
+            element={
+              <RequireAuth>
+                <IncomingInspection />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/incoming/:category"
+            element={
+              <RequireAuth>
+                <IncomingFolders />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/admin/trash"
+            element={
+              <RequireAuth>
+                <RequireAdmin>
+                  <AdminTrash />
+                </RequireAdmin>
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/admin/users"
+            element={
+              <RequireAuth>
+                <RequireAdmin>
+                  <AdminUsers />
+                </RequireAdmin>
               </RequireAuth>
             }
           />

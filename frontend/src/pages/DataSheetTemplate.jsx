@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
+import { useAuth } from "../context/AuthContext";
 import { handleGridArrowNav } from "../lib/gridNav";
 import { toStoredNumber } from "../lib/numeric";
 import DecimalCell from "../components/DecimalCell";
@@ -9,6 +10,15 @@ import { useConfirm } from "../hooks/useConfirm";
 const API_ORIGIN = (import.meta.env.VITE_API_URL || `http://${window.location.hostname}:3001/api`).replace(/\/api$/, "");
 
 const EMPTY_SPEC = { balloon_number: "", max_spec: "", min_spec: "", mean_value: "", decimal_places: "3" };
+
+// Matches the server-side requireRole("qc", "admin", "engineer") guard on
+// every write route in backend/src/routes/drawings.js -- the Template
+// defines the tolerances every future inspection is checked against, so
+// it's a QC/Engineering-controlled document, not something an operator can
+// change. Operators still see every spec read-only on the Data Sheet's own
+// Measurements grid, so there's no read-only mode to build here -- they
+// just never need this page.
+const TEMPLATE_EDIT_ROLES = ["qc", "admin", "engineer"];
 
 function isPdf(path) {
   return path?.toLowerCase().endsWith(".pdf");
@@ -21,12 +31,19 @@ function isPdf(path) {
 // be added, edited, or removed.
 export default function DataSheetTemplate() {
   const { partId } = useParams();
+  const { user } = useAuth();
+  const canEdit = TEMPLATE_EDIT_ROLES.includes(user?.role);
   const [searchParams] = useSearchParams();
   // Present only when reached from OperationDetail -- switches every drawing
   // fetch/create below from the part's Final bucket to this operation's
   // template bucket (see backend POST /api/drawings for the two separate
   // version sequences this maps onto).
   const operationId = searchParams.get("operation_id");
+  // Carried through from whichever page linked here (OperationDetail or
+  // Inspections) so the back-link below returns to the same in_process/
+  // setup/incoming/final history the user came from, instead of losing that
+  // context and falling back to a default that doesn't match.
+  const type = searchParams.get("type") || (operationId ? "in_process" : "final");
   const [part, setPart] = useState(null);
   const [operation, setOperation] = useState(null);
   const [drawings, setDrawings] = useState([]);
@@ -36,10 +53,25 @@ export default function DataSheetTemplate() {
   const [uploading, setUploading] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState(null);
+  const errorRef = useRef(null);
   const [revisionEdit, setRevisionEdit] = useState("");
   const [savingRevision, setSavingRevision] = useState(false);
+  // Set once here at template setup (In-Process only in practice), not on
+  // each Data Sheet -- every new inspection created against this drawing
+  // inherits it (see POST /api/inspections), so an operator never has to
+  // remember to flip a per-sheet checkbox.
+  const [hundredPercent, setHundredPercent] = useState(false);
+  const [savingHundredPercent, setSavingHundredPercent] = useState(false);
 
   const [specEdits, setSpecEdits] = useState({}); // pointId -> { balloon_number, max_spec, min_spec, mean_value }
+  // pointIds the user has explicitly un-checked "OK / Not OK" for while all
+  // three specs are still blank -- without this, the checkbox (derived from
+  // "are all specs blank") would immediately snap back to checked the moment
+  // they unchecked it, since blank fields alone can't tell "meant to be a
+  // check" apart from "numeric column, spec not typed in yet". Purely a UI
+  // nicety for this editing session -- never saved, and irrelevant again the
+  // instant any spec value is actually typed.
+  const [forcedNumeric, setForcedNumeric] = useState(new Set());
   const [newColumns, setNewColumns] = useState([]); // [{ id: <temp negative id> }, ...] — not yet persisted
   const [saving, setSaving] = useState(false);
   const [pointMenu, setPointMenu] = useState(null); // { pointId, x, y }
@@ -84,7 +116,10 @@ export default function DataSheetTemplate() {
   };
 
   useEffect(() => {
-    loadList();
+    // getPart is just a read, kept regardless of role so the not-authorized
+    // message below can still show the part number for context. loadList
+    // is skipped for everyone else -- it can auto-provision a blank drawing
+    // as a side effect (see below), which only QC/Engineering should trigger.
     api.getPart(partId).then(setPart).catch((e) => setError(e.message));
     if (operationId) {
       api
@@ -94,7 +129,10 @@ export default function DataSheetTemplate() {
     } else {
       setOperation(null);
     }
-  }, [partId, operationId]);
+    if (canEdit) {
+      loadList();
+    }
+  }, [partId, operationId, canEdit]);
 
   useEffect(() => {
     if (!selectedId) {
@@ -106,7 +144,9 @@ export default function DataSheetTemplate() {
       .then((d) => {
         setDrawing(d);
         setRevisionEdit(d.revision_label ?? "");
+        setHundredPercent(!!d.hundred_percent_inspection);
         setNewColumns([]);
+        setForcedNumeric(new Set());
         const specState = {};
         d.points.forEach((p) => {
           specState[p.id] = {
@@ -132,6 +172,14 @@ export default function DataSheetTemplate() {
       window.removeEventListener("scroll", close, true);
     };
   }, [pointMenu]);
+
+  // The error banner sits at the top of the page, but the action that most
+  // often fails (right-click delete on a Find# column, e.g. one already
+  // referenced by recorded measurements) happens far below the drawing
+  // image -- without this, a rejected delete looks like nothing happened.
+  useEffect(() => {
+    if (error) errorRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [error]);
 
   const handleUpload = async (e) => {
     e.preventDefault();
@@ -186,8 +234,49 @@ export default function DataSheetTemplate() {
     }
   };
 
+  const handleToggleHundredPercent = async (checked) => {
+    setHundredPercent(checked); // optimistic -- it's just a checkbox
+    setSavingHundredPercent(true);
+    setError(null);
+    try {
+      const updated = await api.updateDrawing(drawing.id, { hundred_percent_inspection: checked });
+      setDrawing(updated);
+    } catch (e) {
+      setHundredPercent(!checked);
+      setError(e.message);
+    } finally {
+      setSavingHundredPercent(false);
+    }
+  };
+
   const handleSpecChange = (pointId, field, value) => {
     setSpecEdits((prev) => ({ ...prev, [pointId]: { ...prev[pointId], [field]: value } }));
+  };
+
+  // A column with no Max/MEAN/Min spec at all is a pass/fail "OK / Not OK"
+  // check at capture time (see isSpecless in lib/passfail.js) -- this just
+  // makes that existing rule an explicit, editable checkbox here instead of
+  // an implicit "leave everything blank" convention.
+  const isCheckColumn = (pointId) => {
+    const edit = specEdits[pointId];
+    const blank = !edit?.max_spec && !edit?.min_spec && !edit?.mean_value;
+    return blank && !forcedNumeric.has(pointId);
+  };
+
+  const handleToggleCheck = (pointId, checked) => {
+    if (checked) {
+      setForcedNumeric((prev) => {
+        const next = new Set(prev);
+        next.delete(pointId);
+        return next;
+      });
+      setSpecEdits((prev) => ({
+        ...prev,
+        [pointId]: { ...prev[pointId], max_spec: "", min_spec: "", mean_value: "" },
+      }));
+    } else {
+      setForcedNumeric((prev) => new Set(prev).add(pointId));
+    }
   };
 
   const handleAddColumn = () => {
@@ -223,6 +312,19 @@ export default function DataSheetTemplate() {
         return next;
       });
     } catch (e) {
+      // Someone/something already removed it server-side (e.g. a stale tab
+      // retrying a delete that already went through) -- resync instead of
+      // just complaining, since re-fetching is what actually fixes it.
+      if (e.status === 404) {
+        const refreshed = await api.getDrawing(drawing.id);
+        setDrawing(refreshed);
+        setSpecEdits((prev) => {
+          const next = { ...prev };
+          delete next[pointId];
+          return next;
+        });
+        return;
+      }
       setError(e.message);
     }
   };
@@ -276,7 +378,11 @@ export default function DataSheetTemplate() {
   return (
     <div className="page">
       <Link
-        to={operationId ? `/parts/${partId}/operations/${operationId}` : `/parts/${partId}/inspections`}
+        to={
+          operationId
+            ? `/parts/${partId}/operations/${operationId}?type=${type}`
+            : `/parts/${partId}/inspections${type !== "final" ? `?type=${type}` : ""}`
+        }
         className="back-link"
       >
         {operationId ? "← Operation" : "← Data Sheets"}
@@ -285,10 +391,17 @@ export default function DataSheetTemplate() {
         Data Sheet Template — {part?.part_number ?? `Part #${partId}`}
         {operationId ? ` / ${operation?.name ?? "Operation"}` : ""}
       </h1>
+      {!canEdit ? (
+        <p className="sign-panel">
+          The Data Sheet Template is a QC/Engineering-controlled document — you don't have permission to view or
+          edit it here. Every spec it defines is still shown read-only on this part's Data Sheet.
+        </p>
+      ) : (
+        <>
       <p className="muted">
         Set up once per drawing revision. Every inspection for this part reuses these Find# columns automatically.
       </p>
-      {error && <p className="error">{error}</p>}
+      {error && <p className="error" ref={errorRef}>{error}</p>}
 
       <form className="inline-form" onSubmit={handleUpload}>
         <input
@@ -317,6 +430,19 @@ export default function DataSheetTemplate() {
               Save revision
             </button>
           </div>
+
+          {type === "in_process" && (
+            <label className="inline-form hundred-percent-toggle">
+              <input
+                type="checkbox"
+                checked={hundredPercent}
+                disabled={savingHundredPercent}
+                onChange={(e) => handleToggleHundredPercent(e.target.checked)}
+              />
+              100% Inspection (every piece checked, not a sampling plan) — every new Data Sheet for this operation
+              starts this way automatically
+            </label>
+          )}
 
           {drawing.image_path ? (
             <>
@@ -366,12 +492,25 @@ export default function DataSheetTemplate() {
                       />
                     </th>
                   ))}
-                  <th className="add-column-cell" rowSpan={5} onClick={handleAddColumn} title="Add Find#">
+                  <th className="add-column-cell" rowSpan={6} onClick={handleAddColumn} title="Add Find#">
                     + Add Find#
                   </th>
                 </tr>
               </thead>
               <tbody>
+                <tr className="spec-row">
+                  <td>OK / Not OK</td>
+                  {allColumns.map((p) => (
+                    <td key={p.id} className="check-column-cell">
+                      <input
+                        type="checkbox"
+                        checked={isCheckColumn(p.id)}
+                        onChange={(e) => handleToggleCheck(p.id, e.target.checked)}
+                        title="No measurement -- recorded as a pass/fail OK / Not OK check"
+                      />
+                    </td>
+                  ))}
+                </tr>
                 <tr className="spec-row">
                   <td>Max Spec</td>
                   {allColumns.map((p) => (
@@ -380,6 +519,7 @@ export default function DataSheetTemplate() {
                         value={specEdits[p.id]?.max_spec ?? ""}
                         onChange={(v) => handleSpecChange(p.id, "max_spec", v)}
                         decimals={Number(specEdits[p.id]?.decimal_places ?? 3)}
+                        disabled={isCheckColumn(p.id)}
                       />
                     </td>
                   ))}
@@ -392,6 +532,7 @@ export default function DataSheetTemplate() {
                         value={specEdits[p.id]?.mean_value ?? ""}
                         onChange={(v) => handleSpecChange(p.id, "mean_value", v)}
                         decimals={Number(specEdits[p.id]?.decimal_places ?? 3)}
+                        disabled={isCheckColumn(p.id)}
                       />
                     </td>
                   ))}
@@ -404,6 +545,7 @@ export default function DataSheetTemplate() {
                         value={specEdits[p.id]?.min_spec ?? ""}
                         onChange={(v) => handleSpecChange(p.id, "min_spec", v)}
                         decimals={Number(specEdits[p.id]?.decimal_places ?? 3)}
+                        disabled={isCheckColumn(p.id)}
                       />
                     </td>
                   ))}
@@ -418,6 +560,7 @@ export default function DataSheetTemplate() {
                         value={specEdits[p.id]?.decimal_places ?? "3"}
                         onChange={(e) => handleSpecChange(p.id, "decimal_places", e.target.value)}
                         onKeyDown={handleGridArrowNav}
+                        disabled={isCheckColumn(p.id)}
                       />
                     </td>
                   ))}
@@ -431,6 +574,8 @@ export default function DataSheetTemplate() {
               Save Template
             </button>
           </div>
+        </>
+      )}
         </>
       )}
 

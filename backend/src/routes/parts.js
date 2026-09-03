@@ -2,6 +2,7 @@ const express = require("express");
 const db = require("../db");
 const attachRole = require("../middleware/attachRole");
 const requireRole = require("../middleware/requireRole");
+const { archiveOperation } = require("../lib/trash");
 
 const router = express.Router();
 
@@ -79,24 +80,39 @@ router.delete("/:id", attachRole, requireRole("qc", "admin"), (req, res) => {
   }
 });
 
-// GET /api/parts/:partId/operations  (list operations for a part)
+// GET /api/parts/:partId/operations[?scope=setup|in_process]  (list
+// operations for a part -- Set-up/QC and In-Process/Operator each have
+// their own independent list + Data Sheet Template for the same part, see
+// schema.sql's operations.scope comment. No ?scope filters to everything,
+// used by OperationDetail.jsx/DataSheetTemplate.jsx which already know the
+// specific operationId they want and just need to find it in the list.)
 router.get("/:partId/operations", (req, res) => {
-  const operations = db
-    .prepare("SELECT * FROM operations WHERE part_id = ? ORDER BY name")
-    .all(req.params.partId);
+  const { scope } = req.query;
+  const operations = scope
+    ? db.prepare("SELECT * FROM operations WHERE part_id = ? AND scope = ? ORDER BY name").all(req.params.partId, scope)
+    : db.prepare("SELECT * FROM operations WHERE part_id = ? ORDER BY name").all(req.params.partId);
   res.json(operations);
 });
 
-// POST /api/parts/:partId/operations  (create one; body: { name }) -- only
-// qc/admin/engineer may create operations; operators can list but not create.
+const VALID_OPERATION_SCOPES = ["setup", "in_process_operator", "in_process_qc"];
+
+// POST /api/parts/:partId/operations  (create one; body: { name, scope }) --
+// only qc/admin/engineer may create operations; operators can list but not
+// create. scope is required (not defaulted) so every caller has to say
+// which of the three independent lists it's creating into (see schema.sql's
+// operations.scope comment).
 router.post("/:partId/operations", attachRole, requireRole("qc", "admin", "engineer"), (req, res) => {
   const name = req.body.name?.trim();
+  const { scope } = req.body;
   if (!name) return res.status(400).json({ error: "name is required" });
+  if (!VALID_OPERATION_SCOPES.includes(scope)) {
+    return res.status(400).json({ error: `scope must be one of: ${VALID_OPERATION_SCOPES.join(", ")}` });
+  }
 
   try {
     const result = db
-      .prepare("INSERT INTO operations (part_id, name) VALUES (?, ?)")
-      .run(req.params.partId, name);
+      .prepare("INSERT INTO operations (part_id, name, scope) VALUES (?, ?, ?)")
+      .run(req.params.partId, name, scope);
     const operation = db.prepare("SELECT * FROM operations WHERE id = ?").get(result.lastInsertRowid);
     res.status(201).json(operation);
   } catch (err) {
@@ -105,6 +121,67 @@ router.post("/:partId/operations", attachRole, requireRole("qc", "admin", "engin
     }
     throw err;
   }
+});
+
+// PUT /api/parts/:partId/operations/:id  (rename; body: { name }) -- same
+// roles as create.
+router.put("/:partId/operations/:id", attachRole, requireRole("qc", "admin", "engineer"), (req, res) => {
+  const name = req.body.name?.trim();
+  if (!name) return res.status(400).json({ error: "name is required" });
+
+  try {
+    const result = db
+      .prepare("UPDATE operations SET name = ? WHERE id = ? AND part_id = ?")
+      .run(name, req.params.id, req.params.partId);
+    if (result.changes === 0) return res.status(404).json({ error: "Operation not found" });
+    const operation = db.prepare("SELECT * FROM operations WHERE id = ?").get(req.params.id);
+    res.json(operation);
+  } catch (err) {
+    if (err.code === "SQLITE_CONSTRAINT_UNIQUE") {
+      return res.status(409).json({ error: `An operation named "${name}" already exists for this part.` });
+    }
+    throw err;
+  }
+});
+
+// DELETE /api/parts/:partId/operations/:id -- unlike parts/drawings, nothing
+// cascades from operations at the FK level (balloon_drawings.operation_id
+// and inspections.operation_id both reference it with no ON DELETE), so a
+// plain DELETE would fail once a Data Sheet Template or inspections exist.
+// Instead this always succeeds: the whole subtree (template + inspection
+// history) is snapshotted into the admin recycle bin (see lib/trash.js)
+// and then cascaded away manually, in dependency order, inside one
+// transaction so the archive and the removal are atomic.
+router.delete("/:partId/operations/:id", attachRole, requireRole("qc", "admin"), (req, res) => {
+  const operation = db
+    .prepare("SELECT * FROM operations WHERE id = ? AND part_id = ?")
+    .get(req.params.id, req.params.partId);
+  if (!operation) return res.status(404).json({ error: "Operation not found" });
+  const part = db.prepare("SELECT * FROM parts WHERE id = ?").get(operation.part_id);
+
+  const tx = db.transaction(() => {
+    archiveOperation(db, operation, part, req.user.id);
+
+    const inspectionIds = db
+      .prepare("SELECT id FROM inspections WHERE operation_id = ?")
+      .all(operation.id)
+      .map((r) => r.id);
+    if (inspectionIds.length > 0) {
+      db.prepare(
+        `DELETE FROM audit_log WHERE entity_type = 'inspection' AND entity_id IN (${inspectionIds
+          .map(() => "?")
+          .join(",")})`
+      ).run(...inspectionIds);
+    }
+    // Cascades to measurements/inspection_point_summaries/signatures (ON DELETE CASCADE).
+    db.prepare("DELETE FROM inspections WHERE operation_id = ?").run(operation.id);
+    // Cascades to balloon_points (ON DELETE CASCADE).
+    db.prepare("DELETE FROM balloon_drawings WHERE operation_id = ?").run(operation.id);
+    db.prepare("DELETE FROM operations WHERE id = ?").run(operation.id);
+  });
+  tx();
+
+  res.status(204).send();
 });
 
 module.exports = router;

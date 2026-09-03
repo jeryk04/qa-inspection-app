@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api/client";
 import { resultStatus, resultLabel } from "../lib/format";
+import { isSpecless, summarizeCheckPoint } from "../lib/passfail";
 import logo from "../assets/logo.png";
 
 // Same fallback pattern as api/client.js -- not exported from there, so
@@ -77,28 +78,12 @@ function WarningIcon() {
   );
 }
 
-export default function InspectionSheet() {
-  const { inspectionId } = useParams();
-  const [inspection, setInspection] = useState(null);
-  const [drawing, setDrawing] = useState(null);
-  const [error, setError] = useState(null);
-
-  useEffect(() => {
-    (async () => {
-      try {
-        const insp = await api.getInspection(inspectionId);
-        setInspection(insp);
-        if (insp.drawing_id) setDrawing(await api.getDrawing(insp.drawing_id));
-      } catch (e) {
-        setError(e.message);
-      }
-    })();
-  }, [inspectionId]);
-
-  if (error) return <p className="error">{error}</p>;
-  if (!inspection) return <p>Loading...</p>;
-
-  const points = drawing?.points ?? [];
+// One Data Sheet's full report body (header/meta/tables/notes/signature) --
+// used both for the sheet being viewed and, when it's a Final Inspection
+// that required one, the companion Operator In-Process Data Sheet bundled
+// in below it (see linkedInProcess in getInspectionDetail).
+function DataSheetReport({ inspection }) {
+  const points = inspection.points ?? [];
   const result = resultStatus(inspection);
   const samples = [...new Set(inspection.measurements.map((m) => m.sample_number))].sort((a, b) => a - b);
   const grid = Object.fromEntries(
@@ -106,99 +91,150 @@ export default function InspectionSheet() {
   );
   const signature = inspection.signature;
 
+  // A specless (check) column reports as a qty-inspected/qty-rejected
+  // summary instead of one row per piece when either (a) it has an explicit
+  // point-summary (hundred_percent_inspection mode -- possibly with zero
+  // measurements rows to fall back on) or (b) it has more than a handful of
+  // real per-sample rows (the older "Fill + Mark OK" path). A small sample
+  // count still lists every row, same as a numeric column always does.
+  const SUMMARIZE_THRESHOLD = 10;
+  const hasExplicitSummary = (p) => (inspection.pointSummaries || []).some((s) => s.balloon_point_id === p.id);
+  const summaryPoints = points.filter(
+    (p) => isSpecless(p) && (hasExplicitSummary(p) || samples.length > SUMMARIZE_THRESHOLD)
+  );
+  const gridPoints = points.filter((p) => !summaryPoints.includes(p));
+  const summaryRows = summaryPoints.map((point) => ({ point, ...summarizeCheckPoint(point, inspection) }));
+  // The Reject Notes column is just a wall of "—" on a sheet where
+  // everything passed -- only worth a column when at least one row actually
+  // has something to say.
+  const hasAnyReject = summaryRows.some((r) => r.qtyRejected > 0);
+  // A numeric column (e.g. a Surface Roughness spot-check) can need far
+  // fewer actual readings than the specless columns that drove `samples` up
+  // to 100+ in the first place (e.g. one spot-check per lot, not one per
+  // piece) -- rendering the full sample range here would print/show mostly
+  // "—" rows. Re-derive the row list from only the measurements that
+  // actually belong to a still-gridded (numeric) column.
+  const gridSamples = [
+    ...new Set(
+      inspection.measurements
+        .filter((m) => gridPoints.some((p) => p.id === m.balloon_point_id))
+        .map((m) => m.sample_number)
+    ),
+  ].sort((a, b) => a - b);
+
   return (
-    <div className="page sheet-page">
-      <div className="no-print actions-row">
-        <Link to={`/inspections/${inspectionId}`} className="back-link">
-          ← Back to capture
-        </Link>
-        <button onClick={() => window.open(`${BASE_URL}/inspections/${inspectionId}/pdf`, "_blank")}>
-          Print / Export PDF
-        </button>
-      </div>
-
-      <div className="sheet">
-        <header className="report-header">
-          <div className="report-logo-box">
-            <img src={logo} alt="" className="report-logo" />
-          </div>
-          <div className="report-company-info">
-            <div className="report-company-name">{COMPANY.name}</div>
-            <div className="report-company-tagline">{COMPANY.tagline}</div>
-            <div className="report-company-detail">{COMPANY.address}</div>
-            <div className="report-company-detail">
-              Tel: {COMPANY.tel} &nbsp;·&nbsp; Fax: {COMPANY.fax}
-            </div>
-          </div>
-          <div className="report-title-block">
-            <h1>{TYPE_TITLES[inspection.type] ?? "Inspection Data Sheet"}</h1>
-            <div className="type-indicator">
-              {TYPE_LABELS.map(([key, label]) => (
-                <span key={key} className={`type-chip${inspection.type === key ? " type-chip-active" : ""}`}>
-                  {label}
-                </span>
-              ))}
-            </div>
-          </div>
-        </header>
-
-        <div className="report-meta-grid">
-          <div className="report-meta-item">
-            <span className="report-meta-label">Part #</span>
-            <span className="report-meta-value">{inspection.part_number}</span>
-          </div>
-          <div className="report-meta-item">
-            <span className="report-meta-label">Quantity</span>
-            <span className="report-meta-value">{inspection.quantity ?? "—"}</span>
-          </div>
-          <div className="report-meta-item">
-            <span className="report-meta-label">Customer</span>
-            <span className="report-meta-value">{inspection.customer || inspection.client_name}</span>
-          </div>
-          <div className="report-meta-item">
-            <span className="report-meta-label">Job# / WO#</span>
-            <span className="report-meta-value">{inspection.job_number || "—"}</span>
-          </div>
-
-          <div className="report-meta-item">
-            <span className="report-meta-label">Sampling Plan N</span>
-            <span className="report-meta-value">{inspection.sampling_plan_n ?? "—"}</span>
-          </div>
-          <div className="report-meta-item">
-            <span className="report-meta-label">Sampling Plan C</span>
-            <span className="report-meta-value">{inspection.sampling_plan_c ?? "—"}</span>
-          </div>
-          <div className="report-meta-item">
-            <span className="report-meta-label">By</span>
-            <span className="report-meta-value">{inspection.inspector || "—"}</span>
-          </div>
-          <div className="report-meta-item">
-            <span className="report-meta-label">Date</span>
-            <span className="report-meta-value">{inspection.date ? inspection.date.slice(0, 10) : "—"}</span>
-          </div>
-
-          {result === "conditionally_approved" && (
-            <div className="report-meta-item report-meta-wide">
-              <span className="report-meta-label">Reason</span>
-              <span className="report-meta-value">{inspection.conditional_reason}</span>
-            </div>
-          )}
-          <div className="report-meta-item report-meta-result">
-            <span className="report-meta-label">Result</span>
-            <span className={`result-badge result-badge-${result}`}>
-              {(result === "approved" || result === "conditionally_approved") && <CheckIcon />}
-              {result === "rejected" && <XIcon />}
-              {resultLabel(result)}
-            </span>
+    <div className="sheet">
+      <header className="report-header">
+        <div className="report-logo-box">
+          <img src={logo} alt="" className="report-logo" />
+        </div>
+        <div className="report-company-info">
+          <div className="report-company-name">{COMPANY.name}</div>
+          <div className="report-company-tagline">{COMPANY.tagline}</div>
+          <div className="report-company-detail">{COMPANY.address}</div>
+          <div className="report-company-detail">
+            Tel: {COMPANY.tel} &nbsp;·&nbsp; Fax: {COMPANY.fax}
           </div>
         </div>
+        <div className="report-title-block">
+          <h1>{TYPE_TITLES[inspection.type] ?? "Inspection Data Sheet"}</h1>
+          <div className="type-indicator">
+            {TYPE_LABELS.map(([key, label]) => (
+              <span key={key} className={`type-chip${inspection.type === key ? " type-chip-active" : ""}`}>
+                {label}
+              </span>
+            ))}
+          </div>
+        </div>
+      </header>
 
+      <div className="report-meta-grid">
+        {[
+          ["Part #", inspection.part_number],
+          ["Quantity", inspection.quantity ?? "—"],
+          // Incoming Inspection's paper header tracks material FROM a
+          // supplier by their PO#/heat, not a customer/shop Job#-WO# --
+          // same fields InspectionCapture.jsx's INCOMING_HEADER_FIELDS
+          // captures, just laid out for print here.
+          ...(inspection.type === "incoming"
+            ? [
+                ["Supplier", inspection.supplier || "—"],
+                ["PO#", inspection.po_number || "—"],
+                ["Heat #", inspection.heat || "—"],
+              ]
+            : [
+                ["Customer", inspection.customer || inspection.client_name],
+                ["Job# / WO#", inspection.job_number || "—"],
+              ]),
+          ["Sampling Plan N", inspection.sampling_plan_n ?? "—"],
+          ["Sampling Plan C", inspection.sampling_plan_c ?? "—"],
+          ["By", inspection.inspector || "—"],
+          ["Date", inspection.date ? inspection.date.slice(0, 10) : "—"],
+        ].map(([label, value]) => (
+          <div className="report-meta-item" key={label}>
+            <span className="report-meta-label">{label}</span>
+            <span className="report-meta-value">{value}</span>
+          </div>
+        ))}
+
+        {result === "conditionally_approved" && (
+          <div className="report-meta-item report-meta-wide">
+            <span className="report-meta-label">Reason</span>
+            <span className="report-meta-value">{inspection.conditional_reason}</span>
+          </div>
+        )}
+        <div className="report-meta-item report-meta-result">
+          <span className="report-meta-label">Result</span>
+          <span className={`result-badge result-badge-${result}`}>
+            {(result === "approved" || result === "conditionally_approved") && <CheckIcon />}
+            {result === "rejected" && <XIcon />}
+            {resultLabel(result)}
+          </span>
+        </div>
+      </div>
+
+      {summaryRows.length > 0 && (
+        <div className="table-scroll">
+          <table className="sheet-table sheet-summary-table">
+            <thead>
+              <tr>
+                <th>Find #</th>
+                <th>Qty Inspected</th>
+                <th>Qty Rejected</th>
+                {hasAnyReject && <th>Reject Notes</th>}
+                <th>Result</th>
+              </tr>
+            </thead>
+            <tbody>
+              {summaryRows.map(({ point, qtyInspected, qtyRejected, rejectNotes }) => {
+                const rejected = qtyRejected > 0;
+                return (
+                  <tr key={point.id}>
+                    <td>{point.balloon_number}</td>
+                    <td>{qtyInspected}</td>
+                    <td>{qtyRejected}</td>
+                    {hasAnyReject && <td>{rejectNotes || "—"}</td>}
+                    <td>
+                      <span className={`result-badge result-badge-${rejected ? "rejected" : "approved"}`}>
+                        {rejected ? <XIcon /> : <CheckIcon />}
+                        {rejected ? `${qtyRejected} Rejected` : "Approved"}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {gridPoints.length > 0 && (
         <div className="table-scroll">
           <table className="sheet-table">
             <thead>
               <tr>
                 <th>Find #</th>
-                {points.map((p) => (
+                {gridPoints.map((p) => (
                   <th key={p.id}>{p.balloon_number}</th>
                 ))}
               </tr>
@@ -206,26 +242,26 @@ export default function InspectionSheet() {
             <tbody>
               <tr className="sheet-spec-row">
                 <td>Max. Spec.</td>
-                {points.map((p) => (
+                {gridPoints.map((p) => (
                   <td key={p.id}>{p.max_spec != null ? p.max_spec.toFixed(p.decimal_places ?? 3) : "—"}</td>
                 ))}
               </tr>
               <tr className="sheet-spec-row">
                 <td>MEAN</td>
-                {points.map((p) => (
+                {gridPoints.map((p) => (
                   <td key={p.id}>{p.mean_value != null ? p.mean_value.toFixed(p.decimal_places ?? 3) : "—"}</td>
                 ))}
               </tr>
               <tr className="sheet-spec-row sheet-spec-row-last">
                 <td>Min. Spec.</td>
-                {points.map((p) => (
+                {gridPoints.map((p) => (
                   <td key={p.id}>{p.min_spec != null ? p.min_spec.toFixed(p.decimal_places ?? 3) : "—"}</td>
                 ))}
               </tr>
-              {samples.map((s, i) => (
+              {gridSamples.map((s, i) => (
                 <tr key={s} className={i % 2 === 1 ? "sheet-row-alt" : ""}>
                   <td>{Number.isInteger(s) ? s : s.toFixed(1)}</td>
-                  {points.map((p) => {
+                  {gridPoints.map((p) => {
                     const cell = grid[`${p.id}:${s}`];
                     const within = cell?.within_tolerance;
                     const fail = within === 0;
@@ -245,34 +281,78 @@ export default function InspectionSheet() {
             </tbody>
           </table>
         </div>
+      )}
 
-        {inspection.notes && (
-          <p className="report-notes">
-            <strong>Notes:</strong> {inspection.notes}
-          </p>
-        )}
+      {inspection.notes && (
+        <p className="report-notes">
+          <strong>Notes:</strong> {inspection.notes}
+        </p>
+      )}
 
-        <div className="sheet-signature">
-          <div>
-            {signature ? (
-              <div className="signature-script">{signature.full_name}</div>
-            ) : (
-              <div className="signature-line" />
-            )}
-            <span className="muted">
-              Inspector signature{signature ? " · electronically signed" : ""}
-            </span>
-          </div>
-          <div>
-            {signature ? (
-              <div className="signature-value">{formatDateTime(signature.signed_at)}</div>
-            ) : (
-              <div className="signature-line" />
-            )}
-            <span className="muted">Date</span>
-          </div>
+      <div className="sheet-signature">
+        <div>
+          {signature ? (
+            <div className="signature-script">{signature.full_name}</div>
+          ) : (
+            <div className="signature-line" />
+          )}
+          <span className="muted">
+            Inspector signature{signature ? " · electronically signed" : ""}
+          </span>
+        </div>
+        <div>
+          {signature ? (
+            <div className="signature-value">{formatDateTime(signature.signed_at)}</div>
+          ) : (
+            <div className="signature-line" />
+          )}
+          <span className="muted">Date</span>
         </div>
       </div>
+    </div>
+  );
+}
+
+export default function InspectionSheet() {
+  const { inspectionId } = useParams();
+  const [inspection, setInspection] = useState(null);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    api
+      .getInspection(inspectionId)
+      .then(setInspection)
+      .catch((e) => setError(e.message));
+  }, [inspectionId]);
+
+  if (error) return <p className="error">{error}</p>;
+  if (!inspection) return <p>Loading...</p>;
+
+  const linked = inspection.linkedInProcess;
+
+  return (
+    <div className="page sheet-page">
+      <div className="no-print actions-row">
+        <Link to={`/inspections/${inspectionId}`} className="back-link">
+          ← Back to capture
+        </Link>
+        <button onClick={() => window.open(`${BASE_URL}/inspections/${inspectionId}/pdf`, "_blank")}>
+          Print / Export PDF
+        </button>
+      </div>
+
+      <DataSheetReport inspection={inspection} />
+
+      {linked && (
+        <>
+          <div className="sheet-linked-divider">
+            <span>
+              Operator In-Process Data Sheet{linked.job_number ? ` — WO# ${linked.job_number}` : ""}
+            </span>
+          </div>
+          <DataSheetReport inspection={linked} />
+        </>
+      )}
     </div>
   );
 }
