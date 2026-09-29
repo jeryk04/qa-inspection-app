@@ -32,6 +32,7 @@ function archiveOperation(db, operation, part, userId) {
 
   const measurements = forInspections("measurements");
   const pointSummaries = forInspections("inspection_point_summaries");
+  const sampleRows = forInspections("inspection_sample_rows");
   const signatures = forInspections("signatures");
   const auditLog =
     inspectionIds.length === 0
@@ -44,7 +45,17 @@ function archiveOperation(db, operation, part, userId) {
           )
           .all(...inspectionIds);
 
-  const snapshot = { operation, drawings, points, inspections, measurements, pointSummaries, signatures, auditLog };
+  const snapshot = {
+    operation,
+    drawings,
+    points,
+    inspections,
+    measurements,
+    pointSummaries,
+    sampleRows,
+    signatures,
+    auditLog,
+  };
 
   insertTrash(db).run({
     entity_type: "operation",
@@ -60,7 +71,8 @@ function archiveOperation(db, operation, part, userId) {
 // isn't currently taken -- true here since the whole subtree was deleted
 // together and nothing outside it referenced those ids.
 function restoreOperation(db, snapshot) {
-  const { operation, drawings, points, inspections, measurements, pointSummaries, signatures, auditLog } = snapshot;
+  const { operation, drawings, points, inspections, measurements, pointSummaries, sampleRows, signatures, auditLog } =
+    snapshot;
 
   // scope was added after some existing deleted_items snapshots were
   // captured (see schema.sql/db.js) -- those pre-migration snapshots have
@@ -72,29 +84,46 @@ function restoreOperation(db, snapshot) {
 
   const insertDrawing = db.prepare(`
     INSERT INTO balloon_drawings
-      (id, part_id, image_path, version, revision_label, operation_id, hundred_percent_inspection, created_at)
-    VALUES (@id, @part_id, @image_path, @version, @revision_label, @operation_id, @hundred_percent_inspection, @created_at)
+      (id, part_id, image_path, version, revision_label, operation_id, hundred_percent_inspection, machine_log_mode, created_at)
+    VALUES (@id, @part_id, @image_path, @version, @revision_label, @operation_id, @hundred_percent_inspection, @machine_log_mode, @created_at)
   `);
-  drawings.forEach((d) => insertDrawing.run(d));
+  // machine_log_mode didn't exist when some older snapshots were captured --
+  // same fallback as is_check_column above: a pre-migration drawing was
+  // never in that mode, so 0 (off) is always correct, not inferred.
+  drawings.forEach((d) => insertDrawing.run({ ...d, machine_log_mode: d.machine_log_mode ?? 0 }));
 
   const insertPoint = db.prepare(`
     INSERT INTO balloon_points
-      (id, drawing_id, balloon_number, max_spec, min_spec, mean_value, sort_order, decimal_places)
-    VALUES (@id, @drawing_id, @balloon_number, @max_spec, @min_spec, @mean_value, @sort_order, @decimal_places)
+      (id, drawing_id, balloon_number, max_spec, min_spec, mean_value, sort_order, decimal_places, is_check_column, is_reference)
+    VALUES (@id, @drawing_id, @balloon_number, @max_spec, @min_spec, @mean_value, @sort_order, @decimal_places, @is_check_column, @is_reference)
   `);
-  points.forEach((p) => insertPoint.run(p));
+  points.forEach((p) =>
+    insertPoint.run({
+      ...p,
+      // is_check_column didn't exist when some older snapshots were captured
+      // (same situation as operation.scope above) -- fall back to the same
+      // rule db.js's migration backfilled every already-existing point with:
+      // infer it from all-blank specs.
+      is_check_column: p.is_check_column ?? (p.max_spec == null && p.min_spec == null && p.mean_value == null ? 1 : 0),
+      // Older snapshots predate is_reference; nothing was a reference then.
+      is_reference: p.is_reference ?? 0,
+    })
+  );
 
   const insertInspection = db.prepare(`
     INSERT INTO inspections
       (id, part_id, drawing_id, type, inspector, date, status, notes, customer, heat, quantity, supplier,
        po_number, customer_po_number, operation, operation_id, job_number, sampling_plan_n, sampling_plan_c,
-       lot_disposition, conditional_reason, requires_in_process, hundred_percent_inspection, created_by, updated_by)
+       lot_disposition, conditional_reason, requires_in_process, hundred_percent_inspection, machine_log_mode,
+       created_by, updated_by)
     VALUES
       (@id, @part_id, @drawing_id, @type, @inspector, @date, @status, @notes, @customer, @heat, @quantity, @supplier,
        @po_number, @customer_po_number, @operation, @operation_id, @job_number, @sampling_plan_n, @sampling_plan_c,
-       @lot_disposition, @conditional_reason, @requires_in_process, @hundred_percent_inspection, @created_by, @updated_by)
+       @lot_disposition, @conditional_reason, @requires_in_process, @hundred_percent_inspection, @machine_log_mode,
+       @created_by, @updated_by)
   `);
-  inspections.forEach((i) => insertInspection.run(i));
+  // Same machine_log_mode fallback as balloon_drawings above.
+  inspections.forEach((i) => insertInspection.run({ ...i, machine_log_mode: i.machine_log_mode ?? 0 }));
 
   const insertMeasurement = db.prepare(`
     INSERT INTO measurements (id, inspection_id, balloon_point_id, sample_number, measured_value, within_tolerance)
@@ -108,6 +137,16 @@ function restoreOperation(db, snapshot) {
     VALUES (@id, @inspection_id, @balloon_point_id, @qty_inspected, @qty_rejected, @reject_notes)
   `);
   pointSummaries.forEach((s) => insertPointSummary.run(s));
+
+  // sampleRows didn't exist when some older snapshots were captured -- falls
+  // back to an empty array, same reasoning as the column-level fallbacks
+  // above (a pre-migration inspection was never in machine_log_mode, so it
+  // never had any of these rows to begin with).
+  const insertSampleRow = db.prepare(`
+    INSERT INTO inspection_sample_rows (id, inspection_id, sample_number, qty, machine_number, comment)
+    VALUES (@id, @inspection_id, @sample_number, @qty, @machine_number, @comment)
+  `);
+  (sampleRows || []).forEach((r) => insertSampleRow.run(r));
 
   const insertSignature = db.prepare(`
     INSERT INTO signatures (id, inspection_id, user_id, action, signed_at)

@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation, useSearchParams } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { api } from "../api/client";
-import { greeting, timeAgo, ROLE_LABELS, resultLabel } from "../lib/format";
+import { greeting, timeAgo, ROLE_LABELS, resultLabel, typeLabel } from "../lib/format";
 import TrendLine from "../components/charts/TrendLine";
 import RankedBars from "../components/charts/RankedBars";
 import Meter from "../components/charts/Meter";
@@ -16,6 +16,11 @@ const INSPECTION_TYPES = [
   // Incoming isn't a customer picker like the other three -- it's a 3-category
   // folder picker (see IncomingInspection.jsx / lib/incoming.js).
   { key: "incoming", label: "Incoming Inspection", enabled: true, to: "/incoming", icon: "inbox" },
+  // Evaluating a brand new customer or part before it's a qualified
+  // production relationship -- same Customer -> Part -> Operations -> Data
+  // Sheet shape as Set-up (see schema.sql's operations.scope comment), just
+  // its own fully independent operations list.
+  { key: "samples", label: "Samples Inspection", enabled: true, to: "/clients?type=samples", icon: "flask" },
 ];
 
 const ICON_PATHS = {
@@ -52,6 +57,15 @@ const ICON_PATHS = {
       <line x1="18" y1="20" x2="18" y2="10" />
       <line x1="12" y1="20" x2="12" y2="4" />
       <line x1="6" y1="20" x2="6" y2="14" />
+    </>
+  ),
+  flask: (
+    <>
+      <path d="M10 2v7.31" />
+      <path d="M14 9.3V2" />
+      <path d="M8.5 2h7" />
+      <path d="M14 9.3a6.5 6.5 0 1 1-4 0" />
+      <path d="M5.52 16h12.96" />
     </>
   ),
 };
@@ -102,26 +116,50 @@ function DashboardHero({ title, roleView }) {
 // Last few signed (approved/rejected) Data Sheets -- see GET
 // /api/inspections/dashboard-stats, which scopes this the same way as the
 // counts above (company-wide for QC, mine-only for Operator).
+// Who performed it: the operation's scope is authoritative for In-Process
+// (Operator and QC each have their own list), otherwise the creator's role.
+function performerLabel(a) {
+  if (a.operation_scope === "in_process_operator") return "Operator";
+  if (a.operation_scope === "in_process_qc") return "QC";
+  if (a.creator_role === "operator") return "Operator";
+  if (a.creator_role) return "QC";
+  return null;
+}
+
 function RecentActivity({ items }) {
+  const location = useLocation();
   if (!items || items.length === 0) return null;
+  // Back from the Data Sheet returns here (incl. ?tab=activity), not to the
+  // operation page -- see InspectionCapture's returnTo.
+  const returnTo = { to: location.pathname + location.search, label: "Back to Dashboard" };
   return (
     <div className="recent-activity">
       <h2>Recent Activity</h2>
       <ul className="activity-list">
-        {items.map((a) => (
+        {items.map((a) => {
+          const performer = performerLabel(a);
+          return (
           <li key={`${a.inspection_id}-${a.at}`} className="activity-item">
             <span className={`activity-dot activity-dot-${a.action}`} />
-            <Link to={`/inspections/${a.inspection_id}`} className="activity-link">
-              <strong>{a.part_number}</strong>
-              <span className="muted"> · {a.client_name}</span>
-              {a.job_number && <span className="muted"> · WO# {a.job_number}</span>}
+            <Link to={`/inspections/${a.inspection_id}`} state={{ returnTo }} className="activity-link">
+              <span className="activity-main">
+                <strong>{a.part_number}</strong>
+                <span className="muted"> · {a.client_name}</span>
+                {a.job_number && <span className="muted"> · WO# {a.job_number}</span>}
+              </span>
+              <span className="activity-meta">
+                <span className="activity-type">{typeLabel(a.type)}</span>
+                {a.operation_name && <span> · {a.operation_name}</span>}
+                {performer && <span> · by {performer}</span>}
+              </span>
             </Link>
             <span className={`activity-action activity-action-${a.action}`}>
               {a.action === "approved" ? "Approved" : "Rejected"}
             </span>
             <span className="activity-time muted">{timeAgo(a.at)}</span>
           </li>
-        ))}
+          );
+        })}
       </ul>
     </div>
   );
@@ -571,7 +609,12 @@ function EngineerHome() {
   const [analytics, setAnalytics] = useState(null);
   const [error, setError] = useState(null);
   const [jumpToPart, setJumpToPart] = useState(null);
-  const [tab, setTab] = useState("trends");
+  // Active tab lives in the URL (?tab=activity) so coming back from a Data
+  // Sheet -- or refreshing -- reopens the same tab instead of Trends.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tabParam = searchParams.get("tab");
+  const tab = ENGINEER_TABS.some((t) => t.key === tabParam) ? tabParam : "trends";
+  const setTab = (key) => setSearchParams(key === "trends" ? {} : { tab: key }, { replace: true });
 
   useEffect(() => {
     api.getDashboardStats().then(setStats).catch((e) => setError(e.message));
@@ -597,7 +640,7 @@ function EngineerHome() {
 
   return (
     <>
-      <DashboardHero title="Engineer Dashboard" roleView="engineer" />
+      <DashboardHero title={`${ROLE_LABELS.engineer} Dashboard`} roleView="engineer" />
       <div className="page page-wide">
         {error && <p className="error">{error}</p>}
 
@@ -625,10 +668,13 @@ function EngineerHome() {
   );
 }
 
+// Labels derive from ROLE_LABELS (not hand-typed here) so this can't drift
+// from the same text shown everywhere else (AccountMenu's "View as",
+// AdminUsers, MyAccount) the way a second hardcoded copy silently did before.
 const ADMIN_VIEWS = [
-  { key: "qc", label: "QC Inspector", icon: "clipboard" },
-  { key: "operator", label: "Operator", icon: "gear" },
-  { key: "engineer", label: "Engineer", icon: "chart" },
+  { key: "qc", label: ROLE_LABELS.qc, icon: "clipboard" },
+  { key: "operator", label: ROLE_LABELS.operator, icon: "gear" },
+  { key: "engineer", label: ROLE_LABELS.engineer, icon: "chart" },
 ];
 
 // Lets admin enter any of the three role experiences without logging out.
@@ -655,10 +701,15 @@ function AdminMenu({ onSelect }) {
   );
 }
 
-// Post-login home screen, branched by the logged-in user's role. qc gets the
-// original inspection-type picker unchanged; operator and engineer get their
-// role-specific screens. admin gets AdminMenu, which renders one of the same
-// three screens (unchanged) based on adminView, passed down from AppShell.
+// Post-login home screen, branched by the logged-in user's role. operator
+// gets their role-specific screen unconditionally (no preview option).
+// admin gets AdminMenu, which renders any of the three screens based on
+// adminView, passed down from AppShell (name predates QC also getting a
+// preview toggle below -- it's really just "currently previewed view",
+// shared context state, not admin-exclusive despite the name). qc gets
+// QcHome by default but, like admin, can switch to EngineerHome (Quality
+// Analytics) via the same AccountMenu "View as" mechanism -- see
+// AccountMenu.jsx's QC_VIEW_OPTIONS.
 export default function Home({ adminView, setAdminView }) {
   const { user } = useAuth();
 
@@ -667,6 +718,10 @@ export default function Home({ adminView, setAdminView }) {
     if (adminView === "operator") return <OperatorHome />;
     if (adminView === "engineer") return <EngineerHome />;
     return <AdminMenu onSelect={setAdminView} />;
+  }
+
+  if (user?.role === "qc") {
+    return adminView === "engineer" ? <EngineerHome /> : <QcHome />;
   }
 
   if (user?.role === "operator") return <OperatorHome />;

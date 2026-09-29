@@ -1,4 +1,4 @@
--- Database schema: QA Inspection App
+-- Database schema: Inspection App
 -- See docs/PLAN.md section 5 for the original data model.
 
 CREATE TABLE IF NOT EXISTS users (
@@ -6,9 +6,11 @@ CREATE TABLE IF NOT EXISTS users (
   username              TEXT NOT NULL UNIQUE,
   password_hash         TEXT NOT NULL,
   full_name             TEXT NOT NULL,
-  role                  TEXT NOT NULL DEFAULT 'qc' CHECK (role IN ('operator','engineer','qc','admin')),
+  role                  TEXT NOT NULL DEFAULT 'qc' CHECK (role IN ('operator','engineer','qc','supervisor','admin')),
   active                INTEGER NOT NULL DEFAULT 1,
   must_change_password  INTEGER NOT NULL DEFAULT 0,
+  last_login            TEXT,
+  email                 TEXT,
   created_at            TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -29,25 +31,32 @@ CREATE TABLE IF NOT EXISTS parts (
 
 -- Free-text operation names scoped per part (e.g. "Bending", "Chamfer",
 -- "Groove") -- the datasheet-template equivalent of balloon_number: whatever
--- the shop calls this step on this part, not a fixed enum. scope keeps
--- three completely independent operation lists + Data Sheet Templates for
--- the same part -- QC's Set-up, the Operator's own In-Process work, and
--- QC's own separate In-Process work (QC has its own "In-Process Inspection"
--- entry point on Home.jsx too, e.g. to cover for an absent operator, but
--- that must never share the Operator's list). All three may track the same
--- real physical step (e.g. all three could have a "Bending"), but as
--- separate operation rows that share nothing -- not specs, not drawings,
--- not history (only the customer/part number has to match across them).
--- Note this is independent of inspections.type, which stays a plain
--- 'setup'/'in_process' paper-form category regardless of which of the two
--- in_process_* scopes created it. UNIQUE is per (part_id, scope, name), not
--- just (part_id, name), so every side can freely reuse the same name (e.g.
--- "Bending") without colliding with either of the other two.
+-- the shop calls this step on this part, not a fixed enum. scope keeps four
+-- completely independent operation lists + Data Sheet Templates for the
+-- same part -- QC's Set-up, the Operator's own In-Process work, QC's own
+-- separate In-Process work (QC has its own "In-Process Inspection" entry
+-- point on Home.jsx too, e.g. to cover for an absent operator, but that
+-- must never share the Operator's list), and Samples (evaluating a brand
+-- new customer or part before it's a qualified production relationship --
+-- same operation-scoped shape as Set-up, but must never share its list
+-- either, since a part usually keeps its real Set-up/In-Process history
+-- going even if it was originally qualified via Samples). All four may
+-- track the same real physical step (e.g. all four could have a
+-- "Bending"), but as separate operation rows that share nothing -- not
+-- specs, not drawings, not history (only the customer/part number has to
+-- match across them). Note this is independent of inspections.type, which
+-- stays a plain 'setup'/'in_process' paper-form category regardless of
+-- which of the two in_process_* scopes created it ('samples' is the one
+-- exception -- it has a real, matching inspections.type of its own, since
+-- it isn't a paper-form category split like in_process_operator/qc are).
+-- UNIQUE is per (part_id, scope, name), not just (part_id, name), so every
+-- side can freely reuse the same name (e.g. "Bending") without colliding
+-- with any of the other three.
 CREATE TABLE IF NOT EXISTS operations (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   part_id     INTEGER NOT NULL REFERENCES parts(id) ON DELETE CASCADE,
   name        TEXT NOT NULL,
-  scope       TEXT NOT NULL DEFAULT 'setup' CHECK (scope IN ('setup', 'in_process_operator', 'in_process_qc')),
+  scope       TEXT NOT NULL DEFAULT 'setup' CHECK (scope IN ('setup', 'in_process_operator', 'in_process_qc', 'samples')),
   created_at  TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE(part_id, scope, name)
 );
@@ -70,6 +79,13 @@ CREATE TABLE IF NOT EXISTS balloon_drawings (
   revision_label TEXT,
   operation_id  INTEGER REFERENCES operations(id),
   hundred_percent_inspection INTEGER NOT NULL DEFAULT 0, -- 0/1; set once at template setup, copied onto every new inspection created against this drawing (see POST /api/inspections)
+  -- 0/1; In-Process only, same inheritance as hundred_percent_inspection above.
+  -- Adds Qty/Machine #/Comment fields to each sample row instead of one
+  -- shared sampling plan for the whole sheet -- for a periodic check that
+  -- rotates through several machines producing the same part, where each
+  -- row is its own check event (its own qty and note), not one piece. See
+  -- inspection_sample_rows below.
+  machine_log_mode INTEGER NOT NULL DEFAULT 0,
   created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -90,17 +106,33 @@ CREATE TABLE IF NOT EXISTS balloon_points (
   mean_value        REAL,
   sort_order        INTEGER NOT NULL DEFAULT 0,
   decimal_places    INTEGER NOT NULL DEFAULT 3,
+  -- 0/1; whether this column captures as a pass/fail OK/Not-OK check instead
+  -- of a numeric measurement (see isSpecless in frontend/src/lib/passfail.js
+  -- and its backend twin in src/pdf/inspectionSheet.js). Independent from
+  -- whether max_spec/min_spec/mean_value are set -- a check column can still
+  -- carry a documented reference spec (e.g. a Go/No-Go gauge's nominal size)
+  -- without switching to numeric capture.
+  is_check_column   INTEGER NOT NULL DEFAULT 0,
+  -- 0/1; a reference dimension -- the drawing prints its spec in
+  -- parentheses, e.g. "(5.18)". Display-only: the spec values stay plain
+  -- numbers (a MEAN with no Max/Min is never flagged out of tolerance
+  -- anyway), and every place that shows the spec wraps it in parentheses.
+  -- Set by typing the parentheses in the Data Sheet Template.
+  is_reference      INTEGER NOT NULL DEFAULT 0,
   UNIQUE(drawing_id, balloon_number)
 );
 
--- type covers the 6 checkboxes on the paper Data Sheet. Phase 1 UI only
--- creates 'final' inspections; the rest exist so the model/PDF can already
--- represent them without a schema change later.
+-- type covers the 6 checkboxes on the paper Data Sheet, plus 'samples' --
+-- a QC-only type with no paper-form checkbox of its own, for evaluating a
+-- brand new customer or part (see operations.scope's comment above; scoped
+-- the same way as 'setup', Customer -> Part -> Operations -> Data Sheet).
+-- 'quote'/'other' still aren't reachable from the UI; they exist so the
+-- model/PDF can already represent them without a schema change later.
 CREATE TABLE IF NOT EXISTS inspections (
   id                  INTEGER PRIMARY KEY AUTOINCREMENT,
   part_id             INTEGER NOT NULL REFERENCES parts(id) ON DELETE CASCADE,
   drawing_id          INTEGER REFERENCES balloon_drawings(id),
-  type                TEXT NOT NULL CHECK (type IN ('quote', 'incoming', 'setup', 'in_process', 'final', 'other')),
+  type                TEXT NOT NULL CHECK (type IN ('quote', 'incoming', 'setup', 'in_process', 'final', 'other', 'samples')),
   inspector           TEXT,
   date                TEXT NOT NULL DEFAULT (datetime('now')),
   status              TEXT NOT NULL DEFAULT 'in_progress' CHECK (status IN ('in_progress', 'approved', 'rejected')),
@@ -120,6 +152,7 @@ CREATE TABLE IF NOT EXISTS inspections (
   conditional_reason  TEXT, -- required reason text when signed as Conditionally Approved (status stays 'approved')
   requires_in_process INTEGER NOT NULL DEFAULT 0, -- 0/1; Final Inspection only -- see hasQualifyingInProcess in routes/inspections.js
   hundred_percent_inspection INTEGER NOT NULL DEFAULT 0, -- 0/1; In-Process only -- switches specless columns to inspection_point_summaries instead of one measurements row per sample
+  machine_log_mode   INTEGER NOT NULL DEFAULT 0, -- 0/1; In-Process only -- see balloon_drawings.machine_log_mode and inspection_sample_rows
   created_by          INTEGER REFERENCES users(id),
   updated_by          INTEGER REFERENCES users(id)
 );
@@ -151,6 +184,54 @@ CREATE TABLE IF NOT EXISTS inspection_point_summaries (
   reject_notes      TEXT,
   UNIQUE(inspection_id, balloon_point_id)
 );
+
+-- Per-row metadata for machine_log_mode (see inspections.machine_log_mode
+-- above) -- a sample row otherwise has no row of its own at all (it's just
+-- whatever sample_number values show up in measurements), but this mode's
+-- paper form gives each row its own inspected qty, source machine #, and a
+-- free-text comment, on top of the usual per-point measurements for that
+-- same sample_number. Only ever populated when machine_log_mode is on;
+-- harmless (just empty) otherwise.
+CREATE TABLE IF NOT EXISTS inspection_sample_rows (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  inspection_id     INTEGER NOT NULL REFERENCES inspections(id) ON DELETE CASCADE,
+  sample_number     REAL NOT NULL,
+  qty               INTEGER,
+  machine_number    TEXT,
+  comment           TEXT,
+  UNIQUE(inspection_id, sample_number)
+);
+
+-- Optional supporting photos on an inspection -- e.g. a non-conformance or
+-- visual reference on a Final Inspection. Zero or more per inspection, not
+-- tied to a specific balloon_point_id (unlike measurements) since a photo
+-- documents the part/lot as a whole, not one Find# reading.
+CREATE TABLE IF NOT EXISTS inspection_photos (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  inspection_id INTEGER NOT NULL REFERENCES inspections(id) ON DELETE CASCADE,
+  image_path    TEXT NOT NULL,
+  caption       TEXT,
+  uploaded_by   INTEGER REFERENCES users(id),
+  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_inspection_photos_inspection ON inspection_photos(inspection_id);
+
+-- Supplier certs (material certs, CoCs, plating/heat-treat certs...) attached
+-- as PDFs to an Incoming Inspection Data Sheet -- Material, Subcomponent and
+-- Subcontractor alike. Kept separate from inspection_photos since a cert is
+-- a document of record, not a visual reference, and needs its original file
+-- name shown. Zero or more per inspection.
+CREATE TABLE IF NOT EXISTS inspection_certs (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  inspection_id INTEGER NOT NULL REFERENCES inspections(id) ON DELETE CASCADE,
+  file_path     TEXT NOT NULL,
+  original_name TEXT NOT NULL,
+  uploaded_by   INTEGER REFERENCES users(id),
+  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_inspection_certs_inspection ON inspection_certs(inspection_id);
 
 -- One row per meaningful action on a record (created / header_updated /
 -- measurements_saved / status_changed) for ISO-style traceability of who
@@ -195,9 +276,12 @@ CREATE TABLE IF NOT EXISTS deleted_items (
   restored_at   TEXT
 );
 
--- Which customers a user is assigned to, for admin bookkeeping only --
--- purely informational (shown on the user's profile), not enforced as an
--- access restriction anywhere else in the app.
+-- Which customers a user is assigned to (Admin > Users' "Assigned
+-- customers"). For an Operator account, this is a real access restriction --
+-- see backend/src/lib/operatorAccess.js -- an Operator can only browse,
+-- create, view, or edit In-Process work for a customer listed here. Every
+-- other role is unrestricted by customer regardless of what's set here; for
+-- them this row is informational only (shown on the user's profile).
 CREATE TABLE IF NOT EXISTS user_clients (
   user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   client_id   INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,

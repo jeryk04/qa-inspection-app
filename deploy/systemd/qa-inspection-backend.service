@@ -1,0 +1,27 @@
+[Unit]
+Description=QA Inspection App - Backend API
+After=network.target
+
+[Service]
+Type=simple
+
+# EDIT before installing:
+#   - User: a non-root service account that owns the install directory
+#     (so the backend can read/write backend/data.db and backend/uploads/).
+#   - WorkingDirectory: the absolute path to backend/ on this server. dotenv
+#     reads backend/.env relative to this cwd, so it must point here exactly.
+#   - ExecStart: the absolute path to `node` on this machine -- run
+#     `which node` as the service user first. systemd does NOT source your
+#     shell profile, so a version manager (nvm, etc.) will NOT resolve from
+#     a bare `node` or from /usr/bin/node unless that's really where it lives.
+User=REPLACE_WITH_SERVICE_USER
+WorkingDirectory=REPLACE_WITH_INSTALL_DIR/backend
+ExecStart=/usr/bin/node src/index.js
+
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

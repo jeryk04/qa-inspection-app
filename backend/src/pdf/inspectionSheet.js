@@ -57,12 +57,11 @@ const COMPANY = {
 // Matches InspectionSheet.jsx's TYPE_LABELS exactly (order + wording) --
 // rendered as a row of pill chips now, not the paper form's checkbox grid.
 const TYPE_CHIPS = [
-  ["quote", "Quote"],
   ["incoming", "Incoming"],
-  ["setup", "1st Article"],
+  ["setup", "Set Up"],
   ["in_process", "In Process"],
   ["final", "Final"],
-  ["other", "Other"],
+  ["samples", "Samples"],
 ];
 
 const TYPE_TITLES = {
@@ -72,6 +71,7 @@ const TYPE_TITLES = {
   in_process: "IN-PROCESS INSPECTION DATA SHEET",
   final: "FINAL INSPECTION DATA SHEET",
   other: "INSPECTION DATA SHEET",
+  samples: "SAMPLES INSPECTION DATA SHEET",
 };
 
 // Landscape Letter's own dimensions, in points -- used as fixed constants
@@ -85,6 +85,17 @@ const TYPE_TITLES = {
 const PAGE_WIDTH = 792;
 const STANDARD_PAGE_HEIGHT = 612;
 
+// machine_log_mode's three extra fixed-width columns on the Find# grid (see
+// InspectionSheet.jsx's matching layout) -- Qty/Machine # sit right after
+// the sample-number label column, Comment sits after every Find# column.
+// Subtracted from the available width before laying out the Find# columns
+// themselves (both for pagination math and the actual per-column width),
+// same as labelColWidth already is.
+const QTY_COL_WIDTH = 30;
+const MACHINE_COL_WIDTH = 50;
+const COMMENT_COL_WIDTH = 110;
+const MACHINE_LOG_COLS_WIDTH = QTY_COL_WIDTH + MACHINE_COL_WIDTH + COMMENT_COL_WIDTH;
+
 // Breaks one inspection's Find# columns into per-page chunks -- pure data,
 // no drawing, shared by both the height-planning pass and the actual
 // drawing pass below so they can never disagree about what's on which page.
@@ -95,14 +106,19 @@ function planReportPages(inspection) {
   const samples = uniqueSamples(inspection.measurements);
 
   // Same split as InspectionSheet.jsx (the on-screen view) -- a specless
-  // column with an explicit point-summary, or more than a handful of real
-  // per-sample rows, reports as a qty-inspected/qty-rejected tally instead
-  // of one grid column per Find# with 100+ sample rows underneath it.
+  // column reports as a qty-inspected/qty-rejected tally only when it has an
+  // explicit point-summary, the sheet is a 100% inspection (flag set, or the
+  // sampling plan covers the whole quantity), or the sheet is nothing but
+  // check columns with more than a handful of rows. A check sampled
+  // alongside measured dimensions stays in the grid with them.
   const SUMMARIZE_THRESHOLD = 10;
   const hasExplicitSummary = (p) => (inspection.pointSummaries || []).some((s) => s.balloon_point_id === p.id);
-  const summaryPoints = allPoints.filter(
-    (p) => isSpecless(p) && (hasExplicitSummary(p) || samples.length > SUMMARIZE_THRESHOLD)
-  );
+  const planN = Number(inspection.sampling_plan_n);
+  const qty = Number(inspection.quantity);
+  const isHundredPercent = !!inspection.hundred_percent_inspection || (qty > 0 && planN >= qty);
+  const onlyCheckColumns = allPoints.length > 0 && allPoints.every(isSpecless);
+  const summarizeChecks = isHundredPercent || (onlyCheckColumns && samples.length > SUMMARIZE_THRESHOLD);
+  const summaryPoints = allPoints.filter((p) => isSpecless(p) && (hasExplicitSummary(p) || summarizeChecks));
   const points = allPoints.filter((p) => !summaryPoints.includes(p));
   // A numeric column (e.g. a Surface Roughness spot-check) can need far
   // fewer actual readings than the specless columns that drove `samples` up
@@ -111,17 +127,45 @@ function planReportPages(inspection) {
   // the row list from only the measurements that belong to a still-gridded
   // (numeric) point.
   const gridPointIds = new Set(points.map((p) => p.id));
-  const gridSamples = uniqueSamples(inspection.measurements.filter((m) => gridPointIds.has(m.balloon_point_id)));
+  // No specless columns narrowing the row list down (see the comment right
+  // above) -- safe to print the full planned row count, not just whatever's
+  // actually been measured so far.
+  const gridSamples = summaryPoints.length === 0
+    ? withPlannedSamples(samples, inspection)
+    : uniqueSamples(inspection.measurements.filter((m) => gridPointIds.has(m.balloon_point_id)));
+
+  const machineLogMode = !!inspection.machine_log_mode;
+  const sampleRowsByNumber = Object.fromEntries((inspection.sampleRows || []).map((r) => [r.sample_number, r]));
 
   const pageWidth = PAGE_WIDTH - PAGE_MARGIN * 2;
   const labelColWidth = 70;
-  const minColWidth = 42;
-  const maxPointsPerPage = Math.max(1, Math.floor((pageWidth - labelColWidth) / minColWidth));
+  // A sheet with a couple of a/b sibling points (e.g. 14 Find#s where two
+  // split into (a)/(b)) can need 16+ grid columns even though it reads as a
+  // short sheet -- 42 left one such 16-column sheet a single column short of
+  // fitting and spilled it onto an unwanted page 2. 36 still leaves each
+  // numeric cell (up to ~7 chars at 7pt) comfortable room while buying enough
+  // columns per page that these short sheets match the on-screen /sheet
+  // view's single unpaginated table instead of splitting.
+  const minColWidth = 36;
+  const machineLogColsWidth = machineLogMode ? MACHINE_LOG_COLS_WIDTH : 0;
+  const maxPointsPerPage = Math.max(
+    1,
+    Math.floor((pageWidth - labelColWidth - machineLogColsWidth) / minColWidth)
+  );
 
   const chunks = chunk(points, maxPointsPerPage);
   const pointPages = chunks.length ? chunks : [[]];
 
-  return { inspection, summaryPoints, pointPages, gridSamples, pageWidth, labelColWidth };
+  return {
+    inspection,
+    summaryPoints,
+    pointPages,
+    gridSamples,
+    pageWidth,
+    labelColWidth,
+    machineLogMode,
+    sampleRowsByNumber,
+  };
 }
 
 // Flattens one inspection's planned pages into draw jobs -- each just needs
@@ -147,15 +191,79 @@ function generateInspectionPdf(res, inspection) {
   if (inspection.linkedInProcess) plans.push(planReportPages(inspection.linkedInProcess));
   const jobs = plans.flatMap(buildPageJobs);
 
-  const doc = new PDFDocument({ size: [PAGE_WIDTH, STANDARD_PAGE_HEIGHT], margin: PAGE_MARGIN });
+  // bufferPages so "Sheet X of Y" can be stamped after the fact -- a long
+  // grid spills rows onto continuation pages (see newContinuationPage), so
+  // the real page count per report isn't known until everything's drawn.
+  const doc = new PDFDocument({ size: [PAGE_WIDTH, STANDARD_PAGE_HEIGHT], margin: PAGE_MARGIN, bufferPages: true });
   doc.pipe(res);
 
+  const currentPage = () => doc.bufferedPageRange().count - 1;
+  const firstPageOfPlan = new Map();
   jobs.forEach((job, i) => {
     if (i > 0) doc.addPage({ size: [PAGE_WIDTH, STANDARD_PAGE_HEIGHT], margin: PAGE_MARGIN });
+    if (!firstPageOfPlan.has(job.plan)) firstPageOfPlan.set(job.plan, currentPage());
     drawReportPage(doc, job);
   });
 
+  const starts = plans.map((p) => firstPageOfPlan.get(p));
+  const totalPageCount = currentPage() + 1;
+  plans.forEach((plan, i) => {
+    const start = starts[i];
+    const end = i + 1 < starts.length ? starts[i + 1] : totalPageCount;
+    for (let page = start; page < end; page++) {
+      doc.switchToPage(page);
+      drawSheetNumber(doc, page - start + 1, end - start, plan.pageWidth);
+    }
+  });
+
+  doc.flushPages();
   doc.end();
+}
+
+const PAGE_BOTTOM = STANDARD_PAGE_HEIGHT - PAGE_MARGIN;
+const SHEET_LABEL_Y = PAGE_MARGIN + 16;
+// Same right-hand column the header's title sits in (see drawHeader).
+const TITLE_X_OFFSET = 34 + 10 + 230 + 10;
+
+function drawSheetNumber(doc, pageNum, totalPages, pageWidth) {
+  const titleX = PAGE_MARGIN + TITLE_X_OFFSET;
+  doc
+    .font("Helvetica")
+    .fontSize(7.5)
+    .fillColor(COLOR.textMuted)
+    .text(`Sheet ${pageNum} of ${totalPages}`, titleX, SHEET_LABEL_Y, {
+      width: PAGE_MARGIN + pageWidth - titleX,
+      align: "right",
+      lineBreak: false,
+    });
+  doc.fillColor("#000");
+}
+
+// A page for rows/signature that didn't fit on the previous one: no full
+// header card, just a one-line "continued" caption (the sheet number is
+// stamped at the same height afterwards). Returns the y to resume drawing at.
+function newContinuationPage(doc, inspection) {
+  doc.addPage({ size: [PAGE_WIDTH, STANDARD_PAGE_HEIGHT], margin: PAGE_MARGIN });
+  const title = TYPE_TITLES[inspection.type] ?? "INSPECTION DATA SHEET";
+  doc
+    .font("Helvetica-Bold")
+    .fontSize(9)
+    .fillColor(COLOR.primary)
+    .text(`${title} — Part # ${inspection.part_number ?? ""} (continued)`, PAGE_MARGIN, SHEET_LABEL_Y, {
+      lineBreak: false,
+    });
+  doc.fillColor("#000");
+  return SHEET_LABEL_Y + 20;
+}
+
+// Notes line (if any) + the signature block below it.
+function notesAndSignatureHeight(doc, inspection, pageWidth) {
+  let h = 64; // drawSignatureBlock's own footprint below doc.y
+  if (inspection.notes) {
+    doc.font("Helvetica").fontSize(9);
+    h += 6 + doc.heightOfString(`Notes: ${inspection.notes}`, { width: pageWidth });
+  }
+  return h;
 }
 
 // Draws one page of one bundled report: header always; the summary table
@@ -164,20 +272,27 @@ function generateInspectionPdf(res, inspection) {
 // Notes text and signature block.
 function drawReportPage(doc, job) {
   const { plan, pagePoints, pageIndex, totalPages } = job;
-  const { inspection, summaryPoints, gridSamples, pageWidth, labelColWidth } = plan;
+  const { inspection, summaryPoints, gridSamples, pageWidth, labelColWidth, machineLogMode, sampleRowsByNumber } =
+    plan;
   const grid = buildGrid(inspection.measurements);
   const isFirst = pageIndex === 0;
   const isLast = pageIndex === totalPages - 1;
 
-  drawHeader(doc, inspection, pageIndex + 1, totalPages, pageWidth);
+  const newPage = () => newContinuationPage(doc, inspection);
+
+  drawHeader(doc, inspection, pageWidth);
   if (isFirst && summaryPoints.length > 0) {
-    drawSummaryTable(doc, summaryPoints, inspection, pageWidth);
+    drawSummaryTable(doc, summaryPoints, inspection, pageWidth, newPage);
   }
   if (pagePoints.length > 0) {
-    drawGrid(doc, pagePoints, gridSamples, grid, pageWidth, labelColWidth);
+    drawGrid(doc, pagePoints, gridSamples, grid, pageWidth, labelColWidth, machineLogMode, sampleRowsByNumber, newPage);
   }
 
   if (isLast) {
+    if (doc.y + notesAndSignatureHeight(doc, inspection, pageWidth) > PAGE_BOTTOM) {
+      doc.x = doc.page.margins.left;
+      doc.y = newPage();
+    }
     if (inspection.notes) {
       const notesX = doc.page.margins.left;
       const notesY = doc.y + 6;
@@ -192,7 +307,7 @@ function drawReportPage(doc, job) {
 // a row of type pills on the right, a rule, then a light bordered card of
 // label/value fields with the Result pill as its own row underneath --
 // not the old paper form's checkbox row and boxed fields.
-function drawHeader(doc, inspection, pageNum, totalPages, pageWidth) {
+function drawHeader(doc, inspection, pageWidth) {
   const startX = doc.page.margins.left;
   const topY = doc.page.margins.top;
   const pageRight = startX + pageWidth;
@@ -218,11 +333,8 @@ function drawHeader(doc, inspection, pageNum, totalPages, pageWidth) {
 
   y += 15;
   doc.font("Helvetica-Oblique").fontSize(8).fillColor(COLOR.accent).text(COMPANY.tagline, companyX, y, { width: companyWidth });
-  doc
-    .font("Helvetica")
-    .fontSize(7.5)
-    .fillColor(COLOR.textMuted)
-    .text(`Sheet ${pageNum} of ${totalPages}`, titleX, y + 1, { width: titleWidth, align: "right" });
+  // "Sheet X of Y" goes here (y + 1) too, but is stamped afterwards by
+  // drawSheetNumber once the real page count is known.
 
   y += 12;
   doc.font("Helvetica").fontSize(7.5).fillColor("#555").text(COMPANY.addressLine1, companyX, y, { width: companyWidth });
@@ -257,8 +369,8 @@ function drawHeader(doc, inspection, pageNum, totalPages, pageWidth) {
           ["Job# / WO#", inspection.job_number],
         ];
   const row2 = [
-    ["Sampling Plan N", inspection.sampling_plan_n],
-    ["Sampling Plan C", inspection.sampling_plan_c],
+    ["Sampling Plan", inspection.sampling_plan_n],
+    ["Total Rejected", inspection.sampling_plan_c],
     ["By", inspection.signature ? inspection.signature.full_name : inspection.inspector],
     ["Date", inspection.signature ? formatDate(inspection.signature.signed_at) : formatDate(inspection.date)],
   ];
@@ -405,17 +517,41 @@ function drawMiniBadge(doc, cx, cy, label, kind) {
   doc.fillColor("#000");
 }
 
-function drawGrid(doc, pagePoints, samples, grid, pageWidth, labelColWidth) {
+function drawGrid(doc, pagePoints, samples, grid, pageWidth, labelColWidth, machineLogMode, sampleRowsByNumber, newPage) {
   const startX = doc.page.margins.left;
   let y = doc.y;
-  const colW = pagePoints.length > 0 ? (pageWidth - labelColWidth) / pagePoints.length : pageWidth - labelColWidth;
+  // machine_log_mode's three extra columns: Qty/Machine # sit between the
+  // label column and the Find# columns, Comment sits after them -- see
+  // MACHINE_LOG_COLS_WIDTH's comment, already subtracted out of pageWidth
+  // by planReportPages before it ever reaches here.
+  const qtyX = startX + labelColWidth;
+  const machineX = qtyX + QTY_COL_WIDTH;
+  const pointsStartX = machineLogMode ? machineX + MACHINE_COL_WIDTH : startX + labelColWidth;
+  const availableWidth = pageWidth - labelColWidth - (machineLogMode ? MACHINE_LOG_COLS_WIDTH : 0);
+  const colW = pagePoints.length > 0 ? availableWidth / pagePoints.length : availableWidth;
+  const commentX = pointsStartX + pagePoints.length * colW;
   const rowH = 16;
 
-  drawCell(doc, startX, y, labelColWidth, rowH, "Find #", { bold: true, labelFill: true });
-  pagePoints.forEach((p, i) => {
-    drawCell(doc, startX + labelColWidth + i * colW, y, colW, rowH, String(p.balloon_number), { bold: true });
-  });
-  y += rowH;
+  // Repeated at the top of every continuation page so a spilled-over row
+  // still reads against its Find# column.
+  const drawColumnHeaderRow = () => {
+    drawCell(doc, startX, y, labelColWidth, rowH, "Find #", { bold: true, labelFill: true });
+    if (machineLogMode) {
+      drawCell(doc, qtyX, y, QTY_COL_WIDTH, rowH, "Qty", { bold: true, labelFill: true });
+      drawCell(doc, machineX, y, MACHINE_COL_WIDTH, rowH, "Machine #", { bold: true, labelFill: true });
+    }
+    pagePoints.forEach((p, i) => {
+      drawCell(doc, pointsStartX + i * colW, y, colW, rowH, String(p.balloon_number), { bold: true });
+    });
+    if (machineLogMode) {
+      drawCell(doc, commentX, y, COMMENT_COL_WIDTH, rowH, "Comment", { bold: true, labelFill: true });
+    }
+    y += rowH;
+  };
+
+  // Header row + the three spec rows stay together with at least one sample row.
+  if (y + rowH * 5 > PAGE_BOTTOM) y = newPage();
+  drawColumnHeaderRow();
 
   const specRows = [
     ["Max. Spec.", (p) => p.max_spec],
@@ -425,25 +561,46 @@ function drawGrid(doc, pagePoints, samples, grid, pageWidth, labelColWidth) {
   specRows.forEach(([label, getter], idx) => {
     const isLast = idx === specRows.length - 1;
     drawCell(doc, startX, y, labelColWidth, rowH, label, { bold: true, labelFill: true, thickBottom: isLast });
+    if (machineLogMode) {
+      drawCell(doc, qtyX, y, QTY_COL_WIDTH, rowH, "", { specFill: true, thickBottom: isLast });
+      drawCell(doc, machineX, y, MACHINE_COL_WIDTH, rowH, "", { specFill: true, thickBottom: isLast });
+    }
     pagePoints.forEach((p, i) => {
       const v = getter(p);
-      const text = v != null ? v.toFixed(p.decimal_places ?? 3) : "";
-      drawCell(doc, startX + labelColWidth + i * colW, y, colW, rowH, text, { bold: true, specFill: true, thickBottom: isLast });
+      // Reference dimensions print in parentheses, same as on the drawing.
+      const num = v != null ? v.toFixed(p.decimal_places ?? 3) : "";
+      const text = num && p.is_reference ? `(${num})` : num;
+      drawCell(doc, pointsStartX + i * colW, y, colW, rowH, text, { bold: true, specFill: true, thickBottom: isLast });
     });
+    if (machineLogMode) {
+      drawCell(doc, commentX, y, COMMENT_COL_WIDTH, rowH, "", { specFill: true, thickBottom: isLast });
+    }
     y += rowH;
   });
 
   samples.forEach((s, rowIndex) => {
+    if (y + rowH > PAGE_BOTTOM) {
+      y = newPage();
+      drawColumnHeaderRow();
+    }
     const sampleLabel = Number.isInteger(s) ? String(s) : s.toFixed(1);
     const alt = rowIndex % 2 === 1;
+    const sampleRow = sampleRowsByNumber?.[s];
     drawCell(doc, startX, y, labelColWidth, rowH, sampleLabel, { bold: true, labelFill: true });
+    if (machineLogMode) {
+      drawCell(doc, qtyX, y, QTY_COL_WIDTH, rowH, sampleRow?.qty != null ? String(sampleRow.qty) : "", { altFill: alt });
+      drawCell(doc, machineX, y, MACHINE_COL_WIDTH, rowH, sampleRow?.machine_number || "", { altFill: alt });
+    }
     pagePoints.forEach((p, i) => {
       const cell = grid[`${p.id}:${s}`];
       const raw = cell?.measured_value;
       const text = raw == null ? "" : typeof raw === "number" ? raw.toFixed(p.decimal_places ?? 3) : String(raw);
       const outOfTolerance = Boolean(cell && cell.within_tolerance === 0);
-      drawCell(doc, startX + labelColWidth + i * colW, y, colW, rowH, text, { danger: outOfTolerance, altFill: alt && !outOfTolerance });
+      drawCell(doc, pointsStartX + i * colW, y, colW, rowH, text, { danger: outOfTolerance, altFill: alt && !outOfTolerance });
     });
+    if (machineLogMode) {
+      drawCell(doc, commentX, y, COMMENT_COL_WIDTH, rowH, sampleRow?.comment || "", { altFill: alt, align: "left" });
+    }
     y += rowH;
   });
 
@@ -452,7 +609,15 @@ function drawGrid(doc, pagePoints, samples, grid, pageWidth, labelColWidth) {
 }
 
 function drawCell(doc, x, y, w, h, text, opts = {}) {
-  const { bold = false, danger = false, labelFill = false, specFill = false, altFill = false, thickBottom = false } = opts;
+  const {
+    bold = false,
+    danger = false,
+    labelFill = false,
+    specFill = false,
+    altFill = false,
+    thickBottom = false,
+    align,
+  } = opts;
 
   let fill = null;
   if (danger) fill = COLOR.failFill;
@@ -479,7 +644,7 @@ function drawCell(doc, x, y, w, h, text, opts = {}) {
 
   doc.font(bold ? "Helvetica-Bold" : "Helvetica").fontSize(7);
   doc.fillColor(danger ? COLOR.fail : COLOR.text);
-  doc.text(text, x + 2, y + 4, { width: w - 4, height: h - 4, align: labelFill ? "left" : "center" });
+  doc.text(text, x + 2, y + 4, { width: w - 4, height: h - 4, align: align ?? (labelFill ? "left" : "center") });
   doc.fillColor("#000");
 }
 
@@ -540,6 +705,8 @@ function uniquePoints(measurements) {
         mean_value: m.mean_value,
         sort_order: m.sort_order,
         decimal_places: m.decimal_places,
+        is_reference: m.is_reference,
+        is_check_column: m.is_check_column,
       });
     }
   });
@@ -548,6 +715,19 @@ function uniquePoints(measurements) {
 
 function uniqueSamples(measurements) {
   return [...new Set(measurements.map((m) => m.sample_number))].sort((a, b) => a - b);
+}
+
+// Rows 1..sampling_plan_n print even when nothing's been measured yet, so
+// the sheet can be printed blank and filled in on paper first -- a sample
+// row otherwise only exists in the DB once a value is typed into it (see
+// InspectionCapture.jsx's saveMeasurementsNow), so relying on `measurements`
+// alone would print zero rows for a freshly-planned, still-empty sheet.
+function withPlannedSamples(measuredSamples, inspection) {
+  const target = Math.floor(Number(inspection.sampling_plan_n));
+  if (!Number.isFinite(target) || target <= 0) return measuredSamples;
+  const set = new Set(measuredSamples);
+  for (let i = 1; i <= target; i++) set.add(i);
+  return [...set].sort((a, b) => a - b);
 }
 
 function buildGrid(measurements) {
@@ -568,7 +748,7 @@ function chunk(arr, size) {
 // Mirrors frontend/src/lib/passfail.js -- kept separately since this is a
 // plain Node file with no shared module boundary with the frontend build.
 function isSpecless(point) {
-  return point.max_spec == null && point.min_spec == null && point.mean_value == null;
+  return !!point.is_check_column;
 }
 
 const NOT_OK_PREFIX = "NOT OK";
@@ -616,7 +796,7 @@ function summarizeCheckPoint(point, inspection) {
 // Row-per-Find# table (not transposed, unlike drawGrid) for specless columns
 // summarized as a qty-inspected/qty-rejected tally instead of one column per
 // sample -- see summarizeCheckPoint above for which sheets this applies to.
-function drawSummaryTable(doc, summaryPoints, inspection, pageWidth) {
+function drawSummaryTable(doc, summaryPoints, inspection, pageWidth, newPage) {
   const startX = doc.page.margins.left;
   let y = doc.y;
   const rowH = 16;
@@ -635,14 +815,23 @@ function drawSummaryTable(doc, summaryPoints, inspection, pageWidth) {
   if (hasAnyReject) cols.push({ key: "notes", label: "Reject Notes", w: notesColW });
   cols.push({ key: "result", label: "Result", w: resultColW + (hasAnyReject ? 0 : notesColW) });
 
-  let x = startX;
-  cols.forEach((c) => {
-    drawCell(doc, x, y, c.w, rowH, c.label, { bold: true, labelFill: c.key === "find" });
-    x += c.w;
-  });
-  y += rowH;
+  let x;
+  const drawColumnHeaderRow = () => {
+    x = startX;
+    cols.forEach((c) => {
+      drawCell(doc, x, y, c.w, rowH, c.label, { bold: true, labelFill: c.key === "find" });
+      x += c.w;
+    });
+    y += rowH;
+  };
+  if (y + rowH * 2 > PAGE_BOTTOM) y = newPage();
+  drawColumnHeaderRow();
 
   rows.forEach(({ point, qtyInspected, qtyRejected, rejectNotes }, rowIndex) => {
+    if (y + rowH > PAGE_BOTTOM) {
+      y = newPage();
+      drawColumnHeaderRow();
+    }
     const rejected = qtyRejected > 0;
     const alt = rowIndex % 2 === 1;
     const textByKey = {

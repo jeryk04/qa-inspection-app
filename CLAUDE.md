@@ -72,19 +72,18 @@ single value per point.
 
 - `users` — login accounts: `role` (operator/engineer/qc/admin), `active`
   (deactivate, don't hard-delete, once a user has real audit history),
-  `must_change_password` (forces a one-time password-change prompt on next
-  login — set on every admin-created/reset password, see `backend/src/
+  `must_change_password` (forces a one-time PIN-change prompt on next
+  login — set on every admin-created/reset PIN, see `backend/src/
   routes/auth.js`'s `PUT /password` and `App.jsx`'s `RequireAuth`).
-  **Operators sign in with just their numeric username, no password at
-  all** (`POST /api/auth/login` skips the password check entirely when
-  the matched account's role is `'operator'` — a deliberate shop-floor
-  tap-in tradeoff; every other role still requires one, since QC/Engineer/
-  Admin can approve/reject, delete records, or manage users).
-  `must_change_password` is always reported `false` for Operators
-  regardless of the stored value, since password management doesn't apply
-  to a role that doesn't use one — the real stored value resurfaces (and
-  the forced-change gate applies again) the moment an account is promoted
-  to a role that does.
+  **Every role signs in with a 4-digit numeric PIN** stored in the same
+  `password_hash` column (bcrypt-hashed; length/digit-only format enforced
+  by `backend/src/lib/pin.js`'s `isValidPin`, shared by `auth.js`'s
+  self-service change and `admin.js`'s create/reset) — there is no
+  passwordless path. (Earlier versions let Operators sign in with just
+  their numeric username and no credential at all, as a shop-floor
+  tap-in shortcut; that bypass was removed so every account — including
+  Operator — now carries a real PIN, since a shared shop-floor tablet is
+  exactly the kind of device you don't want wide open.)
 - `clients` — the company's clients
 - `parts` — parts, each associated with a client
 - `balloon_drawings` — the technical drawing image for a part

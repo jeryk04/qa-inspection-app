@@ -1,15 +1,20 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { api } from "../api/client";
 import { useAuth } from "../context/AuthContext";
-import { toStoredNumber } from "../lib/numeric";
+import { formatSpec, toStoredNumber } from "../lib/numeric";
 import { resultLabel, resultStatus, timeAgo } from "../lib/format";
 import { formatPassFail, isSpecless, parsePassFail, summarizeCheckPoint } from "../lib/passfail";
 import DecimalCell from "../components/DecimalCell";
 import PassFailCell from "../components/PassFailCell";
+import PageNav from "../components/PageNav";
 import { useConfirm } from "../hooks/useConfirm";
 
-const BASE_URL = import.meta.env.VITE_API_URL || `http://${window.location.hostname}:3001/api`;
+const BASE_URL = import.meta.env.VITE_API_URL || `${window.location.protocol}//${window.location.hostname}:3001/api`;
+// Uploaded files (photos, drawings) are served from the API origin as plain
+// /uploads/... paths, not under /api -- same derivation as
+// DataSheetTemplate.jsx's API_ORIGIN.
+const API_ORIGIN = BASE_URL.replace(/\/api$/, "");
 const AUTOSAVE_DELAY_MS = 900;
 // Past this many sample rows, the on-screen grid collapses into a summary
 // line by default (e.g. a 100% inspection of 112 pieces) -- printing/PDF
@@ -24,8 +29,8 @@ const HEADER_FIELDS = [
   ["customer", "Customer"],
   ["job_number", "Job# / WO#"],
   ["date", "Date"],
-  ["sampling_plan_n", "Sampling Plan  n="],
-  ["sampling_plan_c", "c="],
+  ["sampling_plan_n", "Sampling Plan"],
+  ["sampling_plan_c", "Total Rejected"],
   ["inspector", "By (Inspector)"],
 ];
 
@@ -40,14 +45,14 @@ const INCOMING_HEADER_FIELDS = [
   ["po_number", "PO#"],
   ["heat", "Heat #"],
   ["date", "Date"],
-  ["sampling_plan_n", "Sampling Plan  n="],
-  ["sampling_plan_c", "c="],
+  ["sampling_plan_n", "Sampling Plan"],
+  ["sampling_plan_c", "Total Rejected"],
   ["inspector", "By (Inspector)"],
 ];
 
 // Final Inspection is the last stop in Set-up -> In-Process -> Final, so it's
 // the only type that can gate on In-Process having already happened -- see
-// the matching OPERATOR_ALLOWED_CLIENTS-style check on PUT /:id/status.
+// the matching hasQualifyingInProcess check on PUT /:id/status.
 const FINAL_HEADER_FIELDS = [...HEADER_FIELDS, ["requires_in_process", "Operator In-Process Data Sheet required"]];
 
 function headerFieldsFor(type) {
@@ -68,10 +73,16 @@ const ACTION_LABELS = {
   created: "Created",
   header_updated: "Header updated",
   measurements_saved: "Measurements saved",
+  sample_rows_saved: "Sample log saved",
   sample_deleted: "Sample deleted",
+  photo_uploaded: "Photo added",
+  photo_deleted: "Photo removed",
+  cert_uploaded: "Cert attached",
+  cert_deleted: "Cert removed",
   status_changed: "Status changed",
   signed_approved: "Signed — Approved",
   signed_rejected: "Signed — Rejected",
+  unlocked: "Reopened for editing",
 };
 
 // Dot color in the History timeline -- the two signing outcomes get their
@@ -106,6 +117,15 @@ function statusLabel(state) {
   return "";
 }
 
+// Merges the Measurements grid's two independent autosave statuses (cell
+// values, and -- machine_log_mode only -- the per-row Qty/Machine #/Comment)
+// into the one pill shown in that card's header.
+function combineStatus(...states) {
+  if (states.includes("saving")) return "saving";
+  if (states.includes("unsaved")) return "unsaved";
+  return "saved";
+}
+
 // Find# columns and their specs belong to the part's Data Sheet Template
 // (see DataSheetTemplate.jsx) — this page only reuses them read-only. The
 // only things an inspector edits here are the header fields and the sample
@@ -115,6 +135,7 @@ function statusLabel(state) {
 export default function InspectionCapture() {
   const { inspectionId } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const { user } = useAuth();
   const [inspection, setInspection] = useState(null);
   const [drawing, setDrawing] = useState(null);
@@ -130,6 +151,8 @@ export default function InspectionCapture() {
   const [values, setValues] = useState({});
   // 100%-inspection tallies -- balloon_point_id -> { qty_inspected, qty_rejected, reject_notes }.
   const [pointSummaries, setPointSummaries] = useState({});
+  // machine_log_mode's per-row fields -- sample_number -> { qty, machine_number, comment }.
+  const [sampleRows, setSampleRows] = useState({});
   const [auditLog, setAuditLog] = useState([]);
   const [error, setError] = useState(null);
   const [notes, setNotes] = useState("");
@@ -137,19 +160,37 @@ export default function InspectionCapture() {
   const [notesStatus, setNotesStatus] = useState("saved");
   const [measurementsStatus, setMeasurementsStatus] = useState("saved");
   const [summariesStatus, setSummariesStatus] = useState("saved");
+  const [sampleRowsStatus, setSampleRowsStatus] = useState("saved");
   const [signingAction, setSigningAction] = useState(null); // null | "approved" | "conditionally_approved" | "rejected"
   const [signerName, setSignerName] = useState("");
   const [signingReason, setSigningReason] = useState("");
   const [signing, setSigning] = useState(false);
+  const [unlocking, setUnlocking] = useState(false);
   const [sampleMenu, setSampleMenu] = useState(null); // { sampleNumber, x, y }
   const [confirm, confirmDialog] = useConfirm();
+  // Optional supporting photos -- Final Inspection only (see the Photos
+  // section further down), so not everything loads this for nothing, but
+  // cheap enough either way that it's simplest to just always fetch it.
+  const [photos, setPhotos] = useState([]);
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
+  const [photoError, setPhotoError] = useState(null);
+  // Supplier cert PDFs -- Incoming Inspection only (see the Certs section).
+  const [certs, setCerts] = useState([]);
+  const [uploadingCert, setUploadingCert] = useState(false);
+  const [certError, setCertError] = useState(null);
 
   const isLocked = inspection ? inspection.status !== "in_progress" : false;
   const hasTemplate = drawing ? drawing.points.length > 0 : false;
   // Hides the Max/MEAN/Min spec rows entirely when nothing on this sheet has
-  // a numeric spec (e.g. a Fixture-only Data Sheet) -- otherwise they'd just
-  // be three rows of "—" with nothing to show.
-  const hasAnySpec = drawing ? drawing.points.some((p) => !isSpecless(p)) : false;
+  // a spec value recorded (e.g. a Fixture-only Data Sheet) -- otherwise
+  // they'd just be three rows of "—" with nothing to show. Checked directly
+  // against the spec fields, not isSpecless/is_check_column -- a check
+  // column can carry a documented reference spec too (e.g. a Go/No-Go
+  // gauge's nominal size), so its values still belong in these rows even
+  // though the column itself captures as pass/fail.
+  const hasAnySpec = drawing
+    ? drawing.points.some((p) => p.max_spec != null || p.min_spec != null || p.mean_value != null)
+    : false;
   // hundred_percent_inspection pulls specless (check) columns out of the
   // sample x point grid entirely, into the compact qty-inspected/qty-rejected
   // summary table instead -- a numeric column always stays in the grid,
@@ -164,16 +205,31 @@ export default function InspectionCapture() {
   const isHundredPercent = isLocked
     ? !!inspection?.hundred_percent_inspection
     : !!(drawing?.hundred_percent_inspection ?? inspection?.hundred_percent_inspection);
+  // Same inheritance as isHundredPercent above -- see DataSheetTemplate.jsx's
+  // "Machine log mode" toggle and schema.sql's machine_log_mode comment.
+  const machineLogMode = isLocked
+    ? !!inspection?.machine_log_mode
+    : !!(drawing?.machine_log_mode ?? inspection?.machine_log_mode);
   const summaryPoints = drawing && isHundredPercent ? drawing.points.filter(isSpecless) : [];
   const gridPoints = drawing ? (isHundredPercent ? drawing.points.filter((p) => !isSpecless(p)) : drawing.points) : [];
-  // Matches the server-side requireRole("qc", "admin") guard on PUT
-  // /:id/status -- hidden here too so an operator doesn't go through the
-  // whole "type your name to sign" flow only to hit a 403 at the end.
-  const canSign = ["qc", "admin"].includes(user?.role);
+  // Matches the server-side guard on PUT /:id/status -- QC/admin/supervisor
+  // sign anything; an operator signs only their own Operator In-Process
+  // sheets. Hidden otherwise so nobody goes through the whole "type your
+  // name to sign" flow only to hit a 403 at the end.
+  const canSign =
+    ["qc", "admin", "supervisor"].includes(user?.role) ||
+    (user?.role === "operator" &&
+      inspection?.type === "in_process" &&
+      inspection?.operation_scope === "in_process_operator");
   // Matches DataSheetTemplate.jsx's own guard and the requireRole("qc",
-  // "admin", "engineer") now on every write route in
+  // "admin", "engineer", "supervisor") now on every write route in
   // backend/src/routes/drawings.js.
-  const canEditTemplate = ["qc", "admin", "engineer"].includes(user?.role);
+  const canEditTemplate = ["qc", "admin", "engineer", "supervisor"].includes(user?.role);
+  // Matches the server-side requireRole("admin", "supervisor") guard on PUT
+  // /:id/unlock -- same roles as DELETE /:id (InspectionHistory.jsx), since
+  // this is the non-destructive alternative to deleting a signed sheet that
+  // turns out to need a correction.
+  const canUnlock = ["admin", "supervisor"].includes(user?.role);
 
   // Snapshots of what's actually been saved, so the beforeunload guard below
   // (and the autosave effects) can tell "typed but not saved" apart from
@@ -182,6 +238,7 @@ export default function InspectionCapture() {
   const savedNotesRef = useRef("");
   const savedValuesRef = useRef("{}");
   const savedSummariesRef = useRef("{}");
+  const savedSampleRowsRef = useRef("{}");
 
   const applyHeaderState = (insp) => {
     const headerState = {};
@@ -257,6 +314,19 @@ export default function InspectionCapture() {
     savedSummariesRef.current = JSON.stringify(initial);
   };
 
+  const applySampleRowState = (insp) => {
+    const initial = {};
+    (insp.sampleRows || []).forEach((r) => {
+      initial[r.sample_number] = {
+        qty: r.qty ?? "",
+        machine_number: r.machine_number ?? "",
+        comment: r.comment ?? "",
+      };
+    });
+    setSampleRows(initial);
+    savedSampleRowsRef.current = JSON.stringify(initial);
+  };
+
   // Full load — only used on first mount / navigating to a different
   // inspection, where there's no unsaved local state yet to protect.
   const load = async () => {
@@ -271,10 +341,15 @@ export default function InspectionCapture() {
       applyNotesState(insp);
       applyMeasurementState(insp);
       applySummaryState(insp);
+      applySampleRowState(insp);
       const sampleCount = new Set(insp.measurements.map((m) => m.sample_number)).size || 1;
       setExpandedSamples(sampleCount <= SAMPLE_COLLAPSE_THRESHOLD);
 
       api.getAuditLog(inspectionId).then(setAuditLog).catch(() => {});
+      api.getInspectionPhotos(inspectionId).then(setPhotos).catch(() => {});
+      if (insp.type === "incoming") {
+        api.getInspectionCerts(inspectionId).then(setCerts).catch(() => {});
+      }
     } catch (e) {
       setError(e.message);
     }
@@ -293,39 +368,58 @@ export default function InspectionCapture() {
 
   // The actual save calls — used both by the debounced autosave effects
   // below and to flush pending edits immediately before Approve/Reject.
+  //
+  // Each one only advances its saved*Ref to what it actually sent -- it
+  // must NOT re-apply the server's response into the live editing state
+  // (setHeader/setNotes/etc.), because the inspector may have kept typing
+  // while the request was in flight (common on a slower tablet Wi-Fi
+  // connection). Doing so would blow away that newer, not-yet-sent edit
+  // with the stale value this save round-trip just echoed back.
   const saveHeaderNow = async (h) => {
     await api.updateInspection(inspectionId, h);
-    const insp = await refreshInspection();
-    applyHeaderState(insp);
+    savedHeaderRef.current = JSON.stringify(h);
+    await refreshInspection();
   };
 
   const saveNotesNow = async (n) => {
     await api.updateInspection(inspectionId, { notes: n });
-    const insp = await refreshInspection();
-    applyNotesState(insp);
+    savedNotesRef.current = n;
+    await refreshInspection();
   };
 
   const saveMeasurementsNow = async () => {
+    // A cell with nothing typed in it and no prior saved value is skipped
+    // entirely -- no point sending a null for every untouched cell in a big
+    // grid. But a cell that WAS saved and got cleared (fixing a typo) still
+    // has to be sent, as an explicit measured_value: null, or the server
+    // never learns it changed -- it just keeps the old value, and the
+    // refresh below would write that stale value straight back into local
+    // state, undoing the clear the inspector just did.
+    const savedValues = JSON.parse(savedValuesRef.current);
     const measurements = [];
     // gridPoints, not drawing.points -- a specless column pulled into the
     // 100%-inspection summary table is saved through point-summaries
     // instead, never as sample-grid measurements rows.
     gridPoints.forEach((p) => {
       samples.forEach((s) => {
-        const raw = values[cellKey(p.id, s)];
-        if (raw !== "" && raw !== undefined) {
-          // Points with no Max/Min spec (e.g. a Fixture check) have nothing
-          // numeric to compare against, so a non-numeric entry like "OK" is
-          // saved as free text rather than discarded as null.
-          const num = toStoredNumber(raw);
-          const measured_value = num == null ? String(raw).trim() : num;
-          measurements.push({ balloon_point_id: p.id, sample_number: s, measured_value });
-        }
+        const key = cellKey(p.id, s);
+        const raw = values[key];
+        const isEmpty = raw === "" || raw === undefined;
+        const hadSavedValue = savedValues[key] !== undefined && savedValues[key] !== "";
+        if (isEmpty && !hadSavedValue) return;
+
+        // Points with no Max/Min spec (e.g. a Fixture check) have nothing
+        // numeric to compare against, so a non-numeric entry like "OK" is
+        // saved as free text rather than discarded as null.
+        const num = isEmpty ? null : toStoredNumber(raw);
+        const measured_value = isEmpty ? null : num == null ? String(raw).trim() : num;
+        measurements.push({ balloon_point_id: p.id, sample_number: s, measured_value });
       });
     });
+    const sentSnapshot = JSON.stringify(values);
     await api.saveMeasurements(inspectionId, measurements);
-    const insp = await refreshInspection();
-    applyMeasurementState(insp);
+    savedValuesRef.current = sentSnapshot;
+    await refreshInspection();
   };
 
   // Always sends every specless (check) point's tally, even an untouched
@@ -339,9 +433,25 @@ export default function InspectionCapture() {
       qty_rejected: Number(pointSummaries[id]?.qty_rejected) || 0,
       reject_notes: pointSummaries[id]?.reject_notes || "",
     }));
+    const sentSnapshot = JSON.stringify(pointSummaries);
     await api.savePointSummaries(inspectionId, summaries);
-    const insp = await refreshInspection();
-    applySummaryState(insp);
+    savedSummariesRef.current = sentSnapshot;
+    await refreshInspection();
+  };
+
+  // Always sends every sample row's fields, even untouched blank ones --
+  // same reasoning as saveSummariesNow above.
+  const saveSampleRowsNow = async () => {
+    const rows = samples.map((s) => ({
+      sample_number: s,
+      qty: sampleRows[s]?.qty || "",
+      machine_number: sampleRows[s]?.machine_number || "",
+      comment: sampleRows[s]?.comment || "",
+    }));
+    const sentSnapshot = JSON.stringify(sampleRows);
+    await api.saveSampleRows(inspectionId, rows);
+    savedSampleRowsRef.current = sentSnapshot;
+    await refreshInspection();
   };
 
   useEffect(() => {
@@ -442,6 +552,30 @@ export default function InspectionCapture() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pointSummaries, isLocked, inspection, isHundredPercent]);
 
+  // Autosave: machine_log_mode's per-row Qty/Machine #/Comment -- only
+  // relevant once machineLogMode is true (inherited from the template);
+  // mirrors the point-summaries autosave above.
+  useEffect(() => {
+    if (!inspection || isLocked || !machineLogMode) return;
+    if (JSON.stringify(sampleRows) === savedSampleRowsRef.current) {
+      setSampleRowsStatus("saved");
+      return;
+    }
+    setSampleRowsStatus("unsaved");
+    const timer = setTimeout(async () => {
+      setSampleRowsStatus("saving");
+      try {
+        await saveSampleRowsNow();
+        setSampleRowsStatus("saved");
+      } catch (e) {
+        setError(e.message);
+        setSampleRowsStatus("unsaved");
+      }
+    }, AUTOSAVE_DELAY_MS);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sampleRows, isLocked, inspection, machineLogMode]);
+
   // True while something typed hasn't reached the server yet -- the ~1s
   // autosave debounce (AUTOSAVE_DELAY_MS) leaves a brief window where the
   // very latest keystroke is still pending. Shared by the beforeunload guard
@@ -454,7 +588,8 @@ export default function InspectionCapture() {
     JSON.stringify(header) !== savedHeaderRef.current ||
     notes !== savedNotesRef.current ||
     JSON.stringify(values) !== savedValuesRef.current ||
-    JSON.stringify(pointSummaries) !== savedSummariesRef.current;
+    JSON.stringify(pointSummaries) !== savedSummariesRef.current ||
+    JSON.stringify(sampleRows) !== savedSampleRowsRef.current;
 
   useEffect(() => {
     const handleBeforeUnload = (e) => {
@@ -466,12 +601,12 @@ export default function InspectionCapture() {
     window.addEventListener("beforeunload", handleBeforeUnload);
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [header, notes, values, pointSummaries]);
+  }, [header, notes, values, pointSummaries, sampleRows]);
 
   // Guards the in-app "leave this Data Sheet" links (back link, View/Print)
   // -- if isDirty(), ask before navigating away instead of silently
   // discarding whatever hasn't autosaved yet.
-  const guardedNavigate = async (e, to) => {
+  const guardedNavigate = async (e, to, navState) => {
     e.preventDefault();
     if (isDirty()) {
       const shouldSave = await confirm("You have unsaved changes on this Data Sheet. Save before leaving?", {
@@ -486,7 +621,7 @@ export default function InspectionCapture() {
         return;
       }
     }
-    navigate(to);
+    navigate(to, navState ? { state: navState } : undefined);
   };
 
   useEffect(() => {
@@ -523,18 +658,37 @@ export default function InspectionCapture() {
     setHeader((prev) => ({ ...prev, [field]: value }));
 
     // Typing a sampling plan n= grows the Measurements grid to match, so the
-    // inspector doesn't have to click "+ Add Sample" n times by hand. Only
-    // ever adds rows, never removes them -- shrinking n (or a stray
-    // keystroke mid-edit) must never delete a row that might already carry
-    // real measurements, same safety property missingSampleRows documents.
+    // inspector doesn't have to click "+ Add Sample" n times by hand. It also
+    // shrinks the grid back down when n is lowered, but only by dropping
+    // trailing rows (highest sample number first) that are still completely
+    // empty -- no typed value in any column and no machine-log qty/machine
+    // #/comment. A row that already carries real data is never auto-removed,
+    // no matter how low n is edited down to; the inspector has to delete
+    // that one by hand via the row's context menu, same as always.
     if (field === "sampling_plan_n") {
       const target = Math.floor(Number(value));
       if (Number.isFinite(target) && target > 0) {
-        const missing = missingSampleRows(target);
-        if (missing.length > 0) {
-          const allRows = [...samples, ...missing].sort((a, b) => a - b);
-          setSamples(allRows);
-          if (allRows.length > SAMPLE_COLLAPSE_THRESHOLD) setExpandedSamples(false);
+        if (samples.length < target) {
+          const missing = missingSampleRows(target);
+          if (missing.length > 0) {
+            const allRows = [...samples, ...missing].sort((a, b) => a - b);
+            setSamples(allRows);
+            if (allRows.length > SAMPLE_COLLAPSE_THRESHOLD) setExpandedSamples(false);
+          }
+        } else if (samples.length > target) {
+          const isRowEmpty = (s) => {
+            const row = sampleRows[s];
+            if (row && (row.qty || row.machine_number || row.comment)) return false;
+            return !gridPoints.some((p) => {
+              const v = values[cellKey(p.id, s)];
+              return v !== undefined && v !== "";
+            });
+          };
+          const kept = [...samples].sort((a, b) => a - b);
+          while (kept.length > target && isRowEmpty(kept[kept.length - 1])) {
+            kept.pop();
+          }
+          if (kept.length !== samples.length) setSamples(kept);
         }
       }
     }
@@ -621,9 +775,78 @@ export default function InspectionCapture() {
         });
         return next;
       });
+      setSampleRows((prev) => {
+        const next = { ...prev };
+        delete next[sampleNumber];
+        return next;
+      });
       await refreshInspection();
     } catch (e) {
       setError(e.message);
+    }
+  };
+
+  const handlePhotoSelected = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // lets picking the same file again re-trigger onChange
+    if (!file) return;
+
+    setUploadingPhoto(true);
+    setPhotoError(null);
+    try {
+      const formData = new FormData();
+      formData.append("image", file);
+      const photo = await api.uploadInspectionPhoto(inspectionId, formData);
+      setPhotos((prev) => [...prev, photo]);
+    } catch (err) {
+      setPhotoError(err.message);
+    } finally {
+      setUploadingPhoto(false);
+    }
+  };
+
+  const handleDeletePhoto = async (photoId) => {
+    if (!(await confirm("Delete this photo?"))) return;
+    setPhotoError(null);
+    try {
+      await api.deleteInspectionPhoto(inspectionId, photoId);
+      setPhotos((prev) => prev.filter((p) => p.id !== photoId));
+    } catch (err) {
+      setPhotoError(err.message);
+    }
+  };
+
+  const handleCertsSelected = async (e) => {
+    const files = Array.from(e.target.files ?? []);
+    e.target.value = ""; // lets picking the same file again re-trigger onChange
+    if (files.length === 0) return;
+
+    setUploadingCert(true);
+    setCertError(null);
+    try {
+      for (const file of files) {
+        const formData = new FormData();
+        formData.append("file", file);
+        const cert = await api.uploadInspectionCert(inspectionId, formData);
+        setCerts((prev) => [...prev, cert]);
+      }
+    } catch (err) {
+      setCertError(err.message);
+    } finally {
+      setUploadingCert(false);
+      api.getAuditLog(inspectionId).then(setAuditLog).catch(() => {});
+    }
+  };
+
+  const handleDeleteCert = async (cert) => {
+    if (!(await confirm(`Remove cert "${cert.original_name}"?`))) return;
+    setCertError(null);
+    try {
+      await api.deleteInspectionCert(inspectionId, cert.id);
+      setCerts((prev) => prev.filter((c) => c.id !== cert.id));
+      api.getAuditLog(inspectionId).then(setAuditLog).catch(() => {});
+    } catch (err) {
+      setCertError(err.message);
     }
   };
 
@@ -635,6 +858,13 @@ export default function InspectionCapture() {
     setPointSummaries((prev) => ({
       ...prev,
       [pointId]: { qty_inspected: 0, qty_rejected: 0, reject_notes: "", ...prev[pointId], [field]: value },
+    }));
+  };
+
+  const handleSampleRowChange = (sampleNumber, field, value) => {
+    setSampleRows((prev) => ({
+      ...prev,
+      [sampleNumber]: { qty: "", machine_number: "", comment: "", ...prev[sampleNumber], [field]: value },
     }));
   };
 
@@ -668,6 +898,9 @@ export default function InspectionCapture() {
     }
     if (isHundredPercent && JSON.stringify(pointSummaries) !== savedSummariesRef.current) {
       await saveSummariesNow();
+    }
+    if (machineLogMode && JSON.stringify(sampleRows) !== savedSampleRowsRef.current) {
+      await saveSampleRowsNow();
     }
     return refreshInspection();
   };
@@ -712,12 +945,29 @@ export default function InspectionCapture() {
     }
   };
 
+  const handleUnlock = async () => {
+    if (
+      !(await confirm(
+        "Reopen this signed Data Sheet for editing? It will go back to \"In Progress\" and need to be re-signed once corrected. The original signature stays in this sheet's History."
+      ))
+    )
+      return;
+    setUnlocking(true);
+    setError(null);
+    try {
+      await api.unlockInspection(inspectionId);
+      load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setUnlocking(false);
+    }
+  };
+
   if (error && !inspection) {
     return (
       <div className="page">
-        <Link to="/" className="back-link">
-          ← Home
-        </Link>
+        <PageNav backTo="/" backLabel="Back to Home" items={[{ label: "Home", to: "/" }, { label: "Data Sheet" }]} />
         <p className="error">{error}</p>
       </div>
     );
@@ -735,25 +985,57 @@ export default function InspectionCapture() {
     inspection.measurements.map((m) => [cellKey(m.balloon_point_id, m.sample_number), m])
   );
 
-  const backTo = inspection.operation_id
+  const parentHref = inspection.operation_id
     ? `/parts/${inspection.part_id}/operations/${inspection.operation_id}?type=${inspection.type}`
     : `/parts/${inspection.part_id}/inspections${inspection.type !== "final" ? `?type=${inspection.type}` : ""}`;
+  const partsHref = `/clients/${inspection.client_id}/parts${inspection.type !== "final" ? `?type=${inspection.type}` : ""}`;
+  // Pages outside the part/operation hierarchy (dashboard Recent Activity,
+  // History, WO# Lookup) pass returnTo when opening a sheet, so the back
+  // arrow returns there instead of jumping into the operation's page. The
+  // breadcrumbs still show the sheet's real place in the hierarchy.
+  const returnTo = location.state?.returnTo;
+  const backTo = returnTo?.to ?? parentHref;
+  const backLabel = returnTo?.label ?? (inspection.operation_id ? "Back to Operation" : "Back to Data Sheets");
 
   return (
     <div className="page">
-      <Link to={backTo} className="back-link" onClick={(e) => guardedNavigate(e, backTo)}>
-        {inspection.operation_id ? "← Operation" : "← Data Sheets"}
-      </Link>
+      <PageNav
+        backTo={backTo}
+        backLabel={backLabel}
+        items={[
+          { label: "Home", to: "/" },
+          { label: inspection.client_name, to: partsHref },
+          { label: inspection.part_number, to: parentHref },
+          { label: "Data Sheet" },
+        ]}
+        onLinkClick={guardedNavigate}
+      />
       <div className="sheet-title-row">
         <div>
           <h1>Data Sheet — {inspection.part_number}</h1>
           <span className={`status status-${resultStatus(inspection)}`}>{resultLabel(resultStatus(inspection))}</span>
         </div>
         <div className="sheet-toolbar">
+          {drawing.image_path && (
+            <a
+              href={`${API_ORIGIN}${drawing.image_path}`}
+              target="_blank"
+              rel="noreferrer"
+              className="toolbar-btn"
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+                <rect x="3" y="3" width="18" height="18" rx="2" />
+                <circle cx="8.5" cy="8.5" r="1.5" />
+                <path d="m21 15-5-5L5 21" />
+              </svg>
+              View Drawing
+            </a>
+          )}
           <Link
             to={`/inspections/${inspectionId}/sheet`}
+            state={location.state}
             className="toolbar-btn"
-            onClick={(e) => guardedNavigate(e, `/inspections/${inspectionId}/sheet`)}
+            onClick={(e) => guardedNavigate(e, `/inspections/${inspectionId}/sheet`, location.state)}
           >
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
               <circle cx="12" cy="12" r="3" />
@@ -783,6 +1065,14 @@ export default function InspectionCapture() {
         <p className="sign-panel">
           This Data Sheet has been signed and is now locked — it can no longer be edited. Use "Export PDF" or
           "View / Print" above to see the final record.
+          {canUnlock && (
+            <>
+              {" "}
+              <button type="button" className="link-button" onClick={handleUnlock} disabled={unlocking}>
+                {unlocking ? "Reopening…" : "Unlock for editing"}
+              </button>
+            </>
+          )}
         </p>
       )}
 
@@ -826,11 +1116,16 @@ export default function InspectionCapture() {
       <section className="form-card">
         <div className="form-card-header">
           <h2>Measurements</h2>
-          {!isLocked && hasTemplate && statusLabel(measurementsStatus) && (
-            <span className={`autosave-pill autosave-pill-${measurementsStatus}`}>
-              {statusLabel(measurementsStatus)}
-            </span>
-          )}
+          {!isLocked &&
+            hasTemplate &&
+            (() => {
+              const combined = combineStatus(measurementsStatus, machineLogMode ? sampleRowsStatus : "saved");
+              return (
+                statusLabel(combined) && (
+                  <span className={`autosave-pill autosave-pill-${combined}`}>{statusLabel(combined)}</span>
+                )
+              );
+            })()}
         </div>
 
         {!hasTemplate ? (
@@ -936,6 +1231,12 @@ export default function InspectionCapture() {
                   <thead>
                     <tr>
                       <th>Find #</th>
+                      {machineLogMode && (
+                        <>
+                          <th>Qty</th>
+                          <th>Machine #</th>
+                        </>
+                      )}
                       {gridPoints.map((p) => (
                         <th key={p.id}>
                           {p.balloon_number}
@@ -946,6 +1247,7 @@ export default function InspectionCapture() {
                           )}
                         </th>
                       ))}
+                      {machineLogMode && <th>Comment</th>}
                     </tr>
                   </thead>
                   <tbody>
@@ -953,21 +1255,42 @@ export default function InspectionCapture() {
                       <>
                         <tr className="spec-row">
                           <td>Max. Spec.</td>
+                          {machineLogMode && (
+                            <>
+                              <td></td>
+                              <td></td>
+                            </>
+                          )}
                           {gridPoints.map((p) => (
-                            <td key={p.id}>{p.max_spec != null ? p.max_spec.toFixed(p.decimal_places ?? 3) : "—"}</td>
+                            <td key={p.id}>{formatSpec(p.max_spec, p) ?? "—"}</td>
                           ))}
+                          {machineLogMode && <td></td>}
                         </tr>
                         <tr className="spec-row">
                           <td>MEAN</td>
+                          {machineLogMode && (
+                            <>
+                              <td></td>
+                              <td></td>
+                            </>
+                          )}
                           {gridPoints.map((p) => (
-                            <td key={p.id}>{p.mean_value != null ? p.mean_value.toFixed(p.decimal_places ?? 3) : "—"}</td>
+                            <td key={p.id}>{formatSpec(p.mean_value, p) ?? "—"}</td>
                           ))}
+                          {machineLogMode && <td></td>}
                         </tr>
                         <tr className="spec-row">
                           <td>Min. Spec.</td>
+                          {machineLogMode && (
+                            <>
+                              <td></td>
+                              <td></td>
+                            </>
+                          )}
                           {gridPoints.map((p) => (
-                            <td key={p.id}>{p.min_spec != null ? p.min_spec.toFixed(p.decimal_places ?? 3) : "—"}</td>
+                            <td key={p.id}>{formatSpec(p.min_spec, p) ?? "—"}</td>
                           ))}
+                          {machineLogMode && <td></td>}
                         </tr>
                       </>
                     )}
@@ -980,6 +1303,35 @@ export default function InspectionCapture() {
                             onContextMenu={(e) => handleSampleContextMenu(e, s)}
                           >
                             <td>{Number.isInteger(s) ? s : s.toFixed(1)}</td>
+                            {machineLogMode && (
+                              <>
+                                <td>
+                                  {isLocked ? (
+                                    <span className="locked-value">{sampleRows[s]?.qty || "—"}</span>
+                                  ) : (
+                                    <input
+                                      type="number"
+                                      min="0"
+                                      className="sample-row-qty-input"
+                                      value={sampleRows[s]?.qty ?? ""}
+                                      onChange={(e) => handleSampleRowChange(s, "qty", e.target.value)}
+                                    />
+                                  )}
+                                </td>
+                                <td>
+                                  {isLocked ? (
+                                    <span className="locked-value">{sampleRows[s]?.machine_number || "—"}</span>
+                                  ) : (
+                                    <input
+                                      type="text"
+                                      className="sample-row-machine-input"
+                                      value={sampleRows[s]?.machine_number ?? ""}
+                                      onChange={(e) => handleSampleRowChange(s, "machine_number", e.target.value)}
+                                    />
+                                  )}
+                                </td>
+                              </>
+                            )}
                             {gridPoints.map((p) => {
                               const value = values[cellKey(p.id, s)] ?? "";
                               const specless = isSpecless(p);
@@ -1016,11 +1368,25 @@ export default function InspectionCapture() {
                                 </td>
                               );
                             })}
+                            {machineLogMode && (
+                              <td>
+                                {isLocked ? (
+                                  <span className="locked-value">{sampleRows[s]?.comment || "—"}</span>
+                                ) : (
+                                  <input
+                                    type="text"
+                                    className="sample-row-comment-input"
+                                    value={sampleRows[s]?.comment ?? ""}
+                                    onChange={(e) => handleSampleRowChange(s, "comment", e.target.value)}
+                                  />
+                                )}
+                              </td>
+                            )}
                           </tr>
                         ))}
                         {samples.length > SAMPLE_COLLAPSE_THRESHOLD && (
                           <tr>
-                            <td colSpan={gridPoints.length + 1} className="samples-collapse-cell">
+                            <td colSpan={gridPoints.length + 1 + (machineLogMode ? 3 : 0)} className="samples-collapse-cell">
                               <button type="button" className="link-button" onClick={() => setExpandedSamples(false)}>
                                 Collapse rows
                               </button>
@@ -1030,7 +1396,7 @@ export default function InspectionCapture() {
                       </>
                     ) : (
                       <tr>
-                        <td colSpan={gridPoints.length + 1} className="samples-collapsed-cell">
+                        <td colSpan={gridPoints.length + 1 + (machineLogMode ? 3 : 0)} className="samples-collapsed-cell">
                           <span>
                             {samples.length} samples
                             {sampleIssueCount() > 0 ? ` — ${sampleIssueCount()} need attention` : " — all OK"}
@@ -1043,7 +1409,7 @@ export default function InspectionCapture() {
                     )}
                     {!isLocked && (
                       <tr>
-                        <td colSpan={gridPoints.length + 1} className="add-row-cell-container">
+                        <td colSpan={gridPoints.length + 1 + (machineLogMode ? 3 : 0)} className="add-row-cell-container">
                           <span className="add-row-cell" onClick={handleAddSample}>
                             + Add Sample
                           </span>
@@ -1109,6 +1475,106 @@ export default function InspectionCapture() {
           />
         )}
       </section>
+
+      {inspection.type === "final" && (
+        <section className="form-card">
+          <div className="form-card-header">
+            <h2>Photos</h2>
+            {!isLocked && (
+              <label className={`secondary-btn photo-upload-btn${uploadingPhoto ? " photo-upload-btn-disabled" : ""}`}>
+                {uploadingPhoto ? "Uploading..." : "+ Add photo"}
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={handlePhotoSelected}
+                  disabled={uploadingPhoto}
+                  hidden
+                />
+              </label>
+            )}
+          </div>
+          {photoError && <p className="error">{photoError}</p>}
+          {photos.length === 0 ? (
+            <p className="muted">
+              {isLocked ? "No photos attached." : "Optional — attach a photo only if this inspection needs one."}
+            </p>
+          ) : (
+            <ul className="photo-gallery">
+              {photos.map((photo) => (
+                <li key={photo.id} className="photo-gallery-item">
+                  <a href={`${API_ORIGIN}${photo.image_path}`} target="_blank" rel="noreferrer">
+                    <img src={`${API_ORIGIN}${photo.image_path}`} alt="Inspection attachment" />
+                  </a>
+                  {!isLocked && (
+                    <button
+                      type="button"
+                      className="icon-btn icon-btn-danger photo-gallery-delete"
+                      title="Delete photo"
+                      onClick={() => handleDeletePhoto(photo.id)}
+                    >
+                      ×
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      )}
+
+      {inspection.type === "incoming" && (
+        <section className="form-card">
+          <div className="form-card-header">
+            <h2>Certs</h2>
+            {!isLocked && (
+              <label className={`secondary-btn photo-upload-btn${uploadingCert ? " photo-upload-btn-disabled" : ""}`}>
+                {uploadingCert ? "Uploading..." : "+ Attach PDF"}
+                <input
+                  type="file"
+                  accept="application/pdf,.pdf"
+                  multiple
+                  onChange={handleCertsSelected}
+                  disabled={uploadingCert}
+                  hidden
+                />
+              </label>
+            )}
+          </div>
+          {certError && <p className="error">{certError}</p>}
+          {certs.length === 0 ? (
+            <p className="muted">
+              {isLocked ? "No certs attached." : "Attach the supplier's material cert / CoC as a PDF."}
+            </p>
+          ) : (
+            <ul className="cert-list">
+              {certs.map((cert) => (
+                <li key={cert.id} className="cert-list-item">
+                  <span className="cert-badge">PDF</span>
+                  <span className="cert-list-body">
+                    <a href={`${API_ORIGIN}${cert.file_path}`} target="_blank" rel="noreferrer">
+                      {cert.original_name}
+                    </a>
+                    <span className="muted">
+                      {cert.uploaded_by_name ? `${cert.uploaded_by_name} · ` : ""}
+                      {timeAgo(cert.created_at)}
+                    </span>
+                  </span>
+                  {!isLocked && (
+                    <button
+                      type="button"
+                      className="icon-btn icon-btn-danger"
+                      title="Remove cert"
+                      onClick={() => handleDeleteCert(cert)}
+                    >
+                      ×
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      )}
 
       {!isLocked && canSign && (
         <section className="form-card signoff-card">

@@ -9,8 +9,20 @@
     <!-- iPad "Add to Home Screen" launches standalone (no address bar) off
          these two tags even without the web manifest Android relies on. -->
     <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-title" content="QA Inspection" />
-    <title>QA Inspection App</title>
+    <meta name="apple-mobile-web-app-title" content="Inspection" />
+    <title>Inspection App</title>
+    <!-- Applies the saved theme choice before first paint -- ThemeContext.jsx
+         does the same thing reactively for the rest of the session, but
+         React hasn't run yet at this point, so without this the page would
+         flash light for a frame on every load for someone who picked dark. -->
+    <script>
+      (function () {
+        try {
+          var saved = localStorage.getItem("theme");
+          document.documentElement.setAttribute("data-theme", saved === "dark" ? "dark" : "light");
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

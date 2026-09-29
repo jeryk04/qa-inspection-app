@@ -1,22 +1,47 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
 import { api } from "../api/client";
+import PageNav from "../components/PageNav";
 import { useAuth } from "../context/AuthContext";
 import { useConfirm } from "../hooks/useConfirm";
-import { ROLE_LABELS } from "../lib/format";
+import { ROLE_LABELS, formatDateTime } from "../lib/format";
 
-const ROLES = ["operator", "engineer", "qc", "admin"];
-// Display/grouping order for the user list -- highest-access first, roughly
-// matching org hierarchy, not the create-form's ROLES order above.
-const ROLE_GROUP_ORDER = ["admin", "engineer", "qc", "operator"];
+const ROLES = ["operator", "engineer", "qc", "supervisor", "admin"];
+// Sort order for the user table -- highest-access first, roughly matching
+// org hierarchy, not the create-form's ROLES order above. Supervisor sits
+// just under admin -- it exists mainly to delete an already-saved
+// inspection, a permission QC itself doesn't have (see inspections.js's
+// DELETE /:id).
+const ROLE_GROUP_ORDER = ["admin", "supervisor", "engineer", "qc", "operator"];
 
-const emptyNewUser = { username: "", password: "", full_name: "", role: "qc" };
+const emptyNewUser = { username: "", password: "", full_name: "", role: "qc", email: "" };
+
+function EditIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+      <path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4Z" />
+    </svg>
+  );
+}
+
+function TrashIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="3 6 5 6 21 6" />
+      <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+      <line x1="10" y1="11" x2="10" y2="17" />
+      <line x1="14" y1="11" x2="14" y2="17" />
+    </svg>
+  );
+}
 
 // Admin-only user management: create/edit users, assign a role, toggle
 // active, reset a password, and tag which customers a user is assigned to.
-// Customer assignment is informational only (see schema.sql's user_clients
-// comment) -- it doesn't restrict what the user can actually see anywhere
-// else in the app.
+// For an Operator account, this customer assignment is a real access
+// restriction -- an Operator can only browse/create/view/edit In-Process
+// work for a customer checked here (see backend/src/lib/operatorAccess.js
+// and schema.sql's user_clients comment). Every other role is unrestricted
+// by customer regardless of what's checked here.
 export default function AdminUsers() {
   const { user: currentUser } = useAuth();
   const [users, setUsers] = useState([]);
@@ -25,6 +50,7 @@ export default function AdminUsers() {
   const [error, setError] = useState(null);
   const [confirm, confirmDialog] = useConfirm();
 
+  const [showCreateForm, setShowCreateForm] = useState(false);
   const [newUser, setNewUser] = useState(emptyNewUser);
 
   const [editingId, setEditingId] = useState(null);
@@ -45,14 +71,15 @@ export default function AdminUsers() {
     api.getClients().then(setClients).catch(() => {});
   }, []);
 
-  // users is already sorted by full_name (see GET /api/admin/users), so
-  // grouping by role here preserves alphabetical order within each group.
-  const groupedUsers = useMemo(() => {
-    return ROLE_GROUP_ORDER.map((role) => ({
-      role,
-      label: ROLE_LABELS[role] ?? role,
-      users: users.filter((u) => u.role === role),
-    })).filter((g) => g.users.length > 0);
+  // users is already sorted by full_name (see GET /api/admin/users) -- sort
+  // by role group on top of that so higher-access roles cluster together,
+  // same ordering the old role-sectioned layout gave for free.
+  const sortedUsers = useMemo(() => {
+    return [...users].sort((a, b) => {
+      const roleDiff = ROLE_GROUP_ORDER.indexOf(a.role) - ROLE_GROUP_ORDER.indexOf(b.role);
+      if (roleDiff !== 0) return roleDiff;
+      return a.full_name.localeCompare(b.full_name);
+    });
   }, [users]);
 
   const handleCreate = async (e) => {
@@ -62,6 +89,7 @@ export default function AdminUsers() {
     try {
       await api.createUser(newUser);
       setNewUser(emptyNewUser);
+      setShowCreateForm(false);
       load();
     } catch (err) {
       setError(err.message);
@@ -76,6 +104,7 @@ export default function AdminUsers() {
       role: user.role,
       active: !!user.active,
       password: "",
+      email: user.email || "",
       client_ids: new Set(user.client_ids),
     });
   };
@@ -116,7 +145,12 @@ export default function AdminUsers() {
   const saveEdit = async (userId) => {
     setError(null);
     try {
-      const payload = { full_name: editForm.full_name, role: editForm.role, active: editForm.active };
+      const payload = {
+        full_name: editForm.full_name,
+        role: editForm.role,
+        active: editForm.active,
+        email: editForm.email.trim(),
+      };
       if (editForm.password) payload.password = editForm.password;
       await api.updateUser(userId, payload);
       await api.updateUserClients(userId, Array.from(editForm.client_ids));
@@ -140,57 +174,85 @@ export default function AdminUsers() {
 
   return (
     <div className="page">
-      <Link to="/" className="back-link">
-        ← Home
-      </Link>
-      <h1>Manage Users</h1>
+      <PageNav backTo="/" backLabel="Back to Home" items={[{ label: "Home", to: "/" }, { label: "User Management" }]} />
 
-      <form className="inline-form" onSubmit={handleCreate}>
-        <input
-          placeholder="Username"
-          value={newUser.username}
-          onChange={(e) => setNewUser((u) => ({ ...u, username: e.target.value }))}
-        />
-        <input
-          placeholder="Full name"
-          value={newUser.full_name}
-          onChange={(e) => setNewUser((u) => ({ ...u, full_name: e.target.value }))}
-        />
-        <input
-          type="password"
-          placeholder="Password"
-          value={newUser.password}
-          onChange={(e) => setNewUser((u) => ({ ...u, password: e.target.value }))}
-        />
-        <select value={newUser.role} onChange={(e) => setNewUser((u) => ({ ...u, role: e.target.value }))}>
-          {ROLES.map((r) => (
-            <option key={r} value={r}>
-              {ROLE_LABELS[r]}
-            </option>
-          ))}
-        </select>
-        <button type="submit">Add user</button>
-      </form>
+      <div className="admin-users-header">
+        <h1>User Management</h1>
+        <button type="button" onClick={() => setShowCreateForm((v) => !v)}>
+          {showCreateForm ? "Cancel" : "+ Add User"}
+        </button>
+      </div>
+
+      {showCreateForm && (
+        <form className="inline-form card admin-create-user-panel" onSubmit={handleCreate}>
+          <input
+            placeholder="Username"
+            value={newUser.username}
+            onChange={(e) => setNewUser((u) => ({ ...u, username: e.target.value }))}
+          />
+          <input
+            placeholder="Full name"
+            value={newUser.full_name}
+            onChange={(e) => setNewUser((u) => ({ ...u, full_name: e.target.value }))}
+          />
+          <input
+            type="email"
+            placeholder="Email (optional)"
+            value={newUser.email}
+            onChange={(e) => setNewUser((u) => ({ ...u, email: e.target.value }))}
+          />
+          <input
+            type="password"
+            placeholder="PIN (4 digits)"
+            inputMode="numeric"
+            pattern="\d*"
+            maxLength={4}
+            value={newUser.password}
+            onChange={(e) => setNewUser((u) => ({ ...u, password: e.target.value.replace(/\D/g, "").slice(0, 4) }))}
+          />
+          <select value={newUser.role} onChange={(e) => setNewUser((u) => ({ ...u, role: e.target.value }))}>
+            {ROLES.map((r) => (
+              <option key={r} value={r}>
+                {ROLE_LABELS[r]}
+              </option>
+            ))}
+          </select>
+          <button type="submit">Add user</button>
+        </form>
+      )}
 
       {error && <p className="error">{error}</p>}
 
       {loading ? (
         <p>Loading...</p>
       ) : (
-        groupedUsers.map((group) => (
-          <section key={group.role} className="admin-user-group">
-            <h2 className="admin-user-group-heading">
-              {group.label} <span className="muted">({group.users.length})</span>
-            </h2>
-            <ul className="card-list">
-              {group.users.map((user) => (
-                <li key={user.id} className="card">
-                  {editingId === user.id ? (
+        <table className="admin-users-table">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Role</th>
+              <th>Status</th>
+              <th>Last Login</th>
+              <th>Created</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {sortedUsers.map((user) =>
+              editingId === user.id ? (
+                <tr key={user.id}>
+                  <td colSpan={6}>
                     <div className="admin-user-edit">
                       <div className="inline-form">
                         <input
                           value={editForm.full_name}
                           onChange={(e) => setEditForm((f) => ({ ...f, full_name: e.target.value }))}
+                        />
+                        <input
+                          type="email"
+                          placeholder="Email (optional)"
+                          value={editForm.email}
+                          onChange={(e) => setEditForm((f) => ({ ...f, email: e.target.value }))}
                         />
                         <select
                           value={editForm.role}
@@ -212,9 +274,14 @@ export default function AdminUsers() {
                         </label>
                         <input
                           type="password"
-                          placeholder="New password (optional)"
+                          placeholder="New PIN (optional)"
+                          inputMode="numeric"
+                          pattern="\d*"
+                          maxLength={4}
                           value={editForm.password}
-                          onChange={(e) => setEditForm((f) => ({ ...f, password: e.target.value }))}
+                          onChange={(e) =>
+                            setEditForm((f) => ({ ...f, password: e.target.value.replace(/\D/g, "").slice(0, 4) }))
+                          }
                         />
                       </div>
 
@@ -272,37 +339,61 @@ export default function AdminUsers() {
                         </button>
                       </div>
                     </div>
-                  ) : (
-                    <div className="admin-user-row">
-                      <div>
-                        <strong>{user.full_name}</strong>
-                        <div className="muted">
-                          @{user.username}
-                          {user.client_ids.length > 0 && ` · ${user.client_ids.length} customer(s) assigned`}
-                        </div>
-                      </div>
-                      <span className={`status status-${user.active ? "active" : "inactive"}`}>
-                        {user.active ? "Active" : "Inactive"}
-                      </span>
-                      <div className="row-actions">
-                        <button type="button" className="secondary-btn" onClick={() => startEdit(user)}>
-                          Edit
-                        </button>
-                        {user.id !== currentUser?.id && (
-                          <button type="button" className="reject" onClick={() => handleDelete(user)}>
-                            Delete
-                          </button>
-                        )}
-                      </div>
+                  </td>
+                </tr>
+              ) : (
+                <tr key={user.id}>
+                  <td>
+                    <strong>{user.full_name}</strong>
+                    {user.id === currentUser?.id && (
+                      <span className="scope-badge scope-badge-neutral admin-user-you-badge">You</span>
+                    )}
+                    <div className="muted">
+                      @{user.username}
+                      {user.email && ` · ${user.email}`}
+                      {user.client_ids.length > 0 && ` · ${user.client_ids.length} customer(s) assigned`}
                     </div>
-                  )}
-                </li>
-              ))}
-            </ul>
-          </section>
-        ))
+                  </td>
+                  <td>
+                    <span className={`role-badge role-badge-${user.role}`}>{ROLE_LABELS[user.role] ?? user.role}</span>
+                  </td>
+                  <td>
+                    <span className={`status status-${user.active ? "active" : "inactive"}`}>
+                      {user.active ? "Active" : "Inactive"}
+                    </span>
+                  </td>
+                  <td>{formatDateTime(user.last_login)}</td>
+                  <td>{formatDateTime(user.created_at)}</td>
+                  <td>
+                    <div className="row-actions">
+                      <button type="button" className="icon-btn" title="Edit" onClick={() => startEdit(user)}>
+                        <EditIcon />
+                      </button>
+                      {user.id !== currentUser?.id && (
+                        <button
+                          type="button"
+                          className="icon-btn icon-btn-danger"
+                          title="Delete"
+                          onClick={() => handleDelete(user)}
+                        >
+                          <TrashIcon />
+                        </button>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              )
+            )}
+            {sortedUsers.length === 0 && !loading && (
+              <tr>
+                <td colSpan={6} className="muted">
+                  No users yet.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
       )}
-      {users.length === 0 && !loading && <p className="muted">No users yet.</p>}
       {confirmDialog}
     </div>
   );

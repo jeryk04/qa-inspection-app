@@ -28,20 +28,38 @@ export default function Login() {
   };
 
   return (
-    <div className="page login-page">
-      <h1>QA Inspection App</h1>
-      <p className="muted">Sign in to continue.</p>
-      <form className="login-form" onSubmit={handleSubmit}>
-        <label>
-          <span className="muted">Username</span>
-          <input value={username} onChange={(e) => setUsername(e.target.value)} autoFocus />
+    <div className="login-screen">
+      <form className="login-card" onSubmit={handleSubmit}>
+        <img src="/icon-192.png" alt="" className="login-mark" />
+        <h1 className="login-title">Inspection App</h1>
+        <p className="login-subtitle">Sign in to continue.</p>
+
+        <label className="login-field">
+          <span>Username</span>
+          <input
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            autoFocus
+            autoComplete="username"
+          />
         </label>
-        <label>
-          <span className="muted">Password (Operators: leave blank)</span>
-          <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+        <label className="login-field">
+          <span>PIN</span>
+          <input
+            type="password"
+            inputMode="numeric"
+            pattern="\d*"
+            maxLength={4}
+            autoComplete="current-password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value.replace(/\D/g, "").slice(0, 4))}
+            className="login-pin-input"
+          />
         </label>
+
         {error && <p className="error">{error}</p>}
-        <button type="submit" disabled={submitting}>
+
+        <button type="submit" disabled={submitting} className="login-submit">
           {submitting ? "Signing in..." : "Sign in"}
         </button>
       </form>

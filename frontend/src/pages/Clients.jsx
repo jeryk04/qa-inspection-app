@@ -8,22 +8,6 @@ import PageNav from "../components/PageNav";
 
 const MAX_RESULTS = 30;
 
-// Operators' In-Process work only ever covers these customers (see the
-// matching OPERATOR_ALLOWED_CLIENTS guard on POST /api/inspections) -- this
-// is the picker-side half, so they never see the other ~110 customers to
-// begin with instead of being blocked only after picking one.
-const OPERATOR_ALLOWED_CLIENT_NAMES = new Set([
-  "Gas Tubes",
-  "Insulet Corp",
-  "PMI",
-  "Shaw Development",
-  "Environment One",
-  "Kawasaki",
-  "Bravo",
-  "Game Scout",
-  "Noveske Rifleworks LLC",
-]);
-
 export default function Clients() {
   const { effectiveRole } = useAuth();
   const isOperator = effectiveRole === "operator";
@@ -32,6 +16,13 @@ export default function Clients() {
   // operator home screen) through to the Parts page. Absent for the normal
   // QC path, which keeps this link exactly as it was before.
   const type = searchParams.get("type");
+  // Set only by AccountMenu's "Browse > Customers" link -- distinguishes
+  // that from every inspection-type entry point, including Final
+  // Inspection's, which (unlike In-Process/Set-up/Samples) also lands here
+  // via a bare /clients with no `type` at all. Creating a new customer (or,
+  // on Parts.jsx, a new part) is catalog maintenance, not part of running an
+  // inspection, so that form only renders in Browse mode.
+  const isBrowseMode = searchParams.get("browse") === "1";
   const [clients, setClients] = useState([]);
   const [allParts, setAllParts] = useState([]);
   const [query, setQuery] = useState("");
@@ -80,19 +71,28 @@ export default function Clients() {
     return ids;
   }, [clients]);
 
-  const visibleClients = useMemo(() => {
-    let result = clients.filter((c) => !incomingOnlyClientIds.has(c.id));
-    if (isOperator) result = result.filter((c) => OPERATOR_ALLOWED_CLIENT_NAMES.has(c.name));
-    return result;
-  }, [clients, isOperator, incomingOnlyClientIds]);
+  // For an Operator, `clients` itself already comes back pre-scoped to their
+  // assigned customers (see GET /api/clients) -- nothing extra to filter for
+  // that here, just the Incoming-only exclusion that applies to every role.
+  const visibleClients = useMemo(
+    () => clients.filter((c) => !incomingOnlyClientIds.has(c.id)),
+    [clients, incomingOnlyClientIds]
+  );
   const visibleClientIds = useMemo(() => new Set(visibleClients.map((c) => c.id)), [visibleClients]);
 
-  // Parts land on the same next screen Parts.jsx sends them to: in_process
-  // and setup go to the per-part Operations list, everything else to the
-  // Data Sheet.
+  // Parts land on the same next screen Parts.jsx sends them to: in_process,
+  // setup, and samples all go to the per-part Operations list, everything
+  // else to the Data Sheet.
   const partHref = (id) => {
-    if (type === "in_process" || type === "setup") return `/parts/${id}/operations?type=${type}`;
+    if (type === "in_process" || type === "setup" || type === "samples") return `/parts/${id}/operations?type=${type}`;
     return type ? `/parts/${id}/inspections?type=${type}` : `/parts/${id}/inspections`;
+  };
+
+  // Carries `browse` (not `type`) on to Parts.jsx so it knows to render its
+  // own "Add part" form too -- see isBrowseMode above.
+  const clientPartsHref = (id) => {
+    if (isBrowseMode) return `/clients/${id}/parts?browse=1`;
+    return type ? `/clients/${id}/parts?type=${type}` : `/clients/${id}/parts`;
   };
 
   const trimmedQuery = query.trim().toLowerCase();
@@ -102,11 +102,11 @@ export default function Clients() {
   }, [visibleClients, trimmedQuery]);
   const matchedParts = useMemo(() => {
     if (!trimmedQuery) return [];
-    // visibleClientIds already excludes pure-Incoming-only clients (and,
-    // for an operator, applies their customer allowlist too) -- applied
-    // for everyone now, not just operators, so a QC search for a raw
-    // material or subcomponent part number doesn't surface a client that
-    // isn't even shown in the list above.
+    // visibleClientIds already excludes pure-Incoming-only clients (and, for
+    // an operator, `clients` itself only ever contains their assigned
+    // customers to begin with) -- applied for everyone now, not just
+    // operators, so a QC search for a raw material or subcomponent part
+    // number doesn't surface a client that isn't even shown in the list above.
     return allParts
       .filter((p) => visibleClientIds.has(p.client_id))
       .filter((p) => !INCOMING_ONLY_PARTS.has(`${clientNameById.get(p.client_id)}:${p.part_number}`))
@@ -193,7 +193,7 @@ export default function Clients() {
         />
       </div>
 
-      {!isOperator && (
+      {isBrowseMode && !isOperator && (
         <form className="inline-form" onSubmit={handleSubmit}>
           <input
             placeholder="Customer name"
@@ -215,7 +215,7 @@ export default function Clients() {
             <ul className="card-list">
               {matchedClients.slice(0, MAX_RESULTS).map((c) => (
                 <li key={c.id} className="card">
-                  <Link to={type ? `/clients/${c.id}/parts?type=${type}` : `/clients/${c.id}/parts`}>
+                  <Link to={clientPartsHref(c.id)}>
                     <strong>{c.name}</strong>
                   </Link>
                 </li>
@@ -272,13 +272,19 @@ export default function Clients() {
                       }}
                     />
                   ) : (
-                    <Link to={type ? `/clients/${c.id}/parts?type=${type}` : `/clients/${c.id}/parts`}>
+                    <Link to={clientPartsHref(c.id)}>
                       <strong>{c.name}</strong>
                     </Link>
                   )}
                 </li>
               ))}
-              {visibleClients.length === 0 && <p className="muted">No customers yet.</p>}
+              {visibleClients.length === 0 && (
+                <p className="muted">
+                  {isOperator
+                    ? "You haven't been assigned any customers yet — ask an admin to assign one in Admin > Users."
+                    : "No customers yet."}
+                </p>
+              )}
             </ul>
           )}
         </>

@@ -120,8 +120,8 @@ const insertDrawing = db.prepare(
 const getPointsForDrawing = db.prepare("SELECT * FROM balloon_points WHERE drawing_id = ? ORDER BY sort_order");
 const insertPoint = db.prepare(`
   INSERT INTO balloon_points
-    (drawing_id, balloon_number, max_spec, min_spec, mean_value, sort_order, decimal_places)
-  VALUES (@drawing_id, @balloon_number, @max_spec, @min_spec, @mean_value, @sort_order, @decimal_places)
+    (drawing_id, balloon_number, max_spec, min_spec, mean_value, sort_order, decimal_places, is_check_column, is_reference)
+  VALUES (@drawing_id, @balloon_number, @max_spec, @min_spec, @mean_value, @sort_order, @decimal_places, @is_check_column, @is_reference)
 `);
 
 // POST /api/drawings  (multipart/form-data: part_id or operation_id required,
@@ -141,7 +141,7 @@ const insertPoint = db.prepare(`
 // decimal_places, new drawing_id) so it starts as an editable copy rather
 // than empty -- unless there is no prior version, in which case it starts
 // empty exactly as before.
-router.post("/", attachRole, requireRole("qc", "admin", "engineer"), upload.single("image"), (req, res) => {
+router.post("/", attachRole, requireRole("qc", "admin", "engineer", "supervisor"), upload.single("image"), (req, res) => {
   const { version, revision_label } = req.body;
   let { part_id, operation_id } = req.body;
 
@@ -182,6 +182,8 @@ router.post("/", attachRole, requireRole("qc", "admin", "engineer"), upload.sing
           mean_value: p.mean_value,
           sort_order: p.sort_order,
           decimal_places: p.decimal_places,
+          is_check_column: p.is_check_column,
+          is_reference: p.is_reference,
         });
       }
     }
@@ -196,8 +198,8 @@ router.post("/", attachRole, requireRole("qc", "admin", "engineer"), upload.sing
 // PUT /api/drawings/:id  (edit the free-text revision label printed on the
 // drawing's title block -- independent from the auto-incrementing version
 // number used for "latest" ordering)
-router.put("/:id", attachRole, requireRole("qc", "admin", "engineer"), (req, res) => {
-  const { revision_label, hundred_percent_inspection } = req.body;
+router.put("/:id", attachRole, requireRole("qc", "admin", "engineer", "supervisor"), (req, res) => {
+  const { revision_label, hundred_percent_inspection, machine_log_mode } = req.body;
   // Built field-by-field (not a blanket COALESCE) since revision_label's own
   // "clear it" gesture is an empty string -- which needs to actually write
   // null, not fall through to "leave it alone" the way an omitted field does.
@@ -211,6 +213,10 @@ router.put("/:id", attachRole, requireRole("qc", "admin", "engineer"), (req, res
     setClauses.push("hundred_percent_inspection = ?");
     params.push(hundred_percent_inspection ? 1 : 0);
   }
+  if (machine_log_mode !== undefined) {
+    setClauses.push("machine_log_mode = ?");
+    params.push(machine_log_mode ? 1 : 0);
+  }
   if (setClauses.length > 0) {
     params.push(req.params.id);
     const result = db.prepare(`UPDATE balloon_drawings SET ${setClauses.join(", ")} WHERE id = ?`).run(...params);
@@ -218,12 +224,18 @@ router.put("/:id", attachRole, requireRole("qc", "admin", "engineer"), (req, res
   }
   const drawing = db.prepare("SELECT * FROM balloon_drawings WHERE id = ?").get(req.params.id);
   if (!drawing) return res.status(404).json({ error: "Drawing not found" });
-  res.json(drawing);
+  // Same shape as GET /:id (points included) -- the frontend keeps whatever
+  // this returns as its current `drawing` state, and expects .points to
+  // always be an array there.
+  const points = db
+    .prepare("SELECT * FROM balloon_points WHERE drawing_id = ? ORDER BY sort_order")
+    .all(req.params.id);
+  res.json({ ...drawing, points });
 });
 
 // DELETE /api/drawings/:id  (cascades to its balloon_points; blocked if any point
 // already has recorded measurements, to protect quality records from deletion)
-router.delete("/:id", attachRole, requireRole("qc", "admin"), (req, res) => {
+router.delete("/:id", attachRole, requireRole("qc", "admin", "supervisor"), (req, res) => {
   try {
     const result = db.prepare("DELETE FROM balloon_drawings WHERE id = ?").run(req.params.id);
     if (result.changes === 0) return res.status(404).json({ error: "Drawing not found" });
@@ -241,8 +253,8 @@ router.delete("/:id", attachRole, requireRole("qc", "admin"), (req, res) => {
 
 // POST /api/drawings/:id/points  (adds a point with its specification, appended
 // to the end of the column order)
-router.post("/:id/points", attachRole, requireRole("qc", "admin", "engineer"), (req, res) => {
-  const { balloon_number, max_spec, min_spec, mean_value, decimal_places } = req.body;
+router.post("/:id/points", attachRole, requireRole("qc", "admin", "engineer", "supervisor"), (req, res) => {
+  const { balloon_number, max_spec, min_spec, mean_value, decimal_places, is_check_column, is_reference } = req.body;
   if (!balloon_number) return res.status(400).json({ error: "balloon_number is required" });
 
   const { maxOrder } = db
@@ -253,8 +265,8 @@ router.post("/:id/points", attachRole, requireRole("qc", "admin", "engineer"), (
   const result = db
     .prepare(
       `INSERT INTO balloon_points
-       (drawing_id, balloon_number, max_spec, min_spec, mean_value, sort_order, decimal_places)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
+       (drawing_id, balloon_number, max_spec, min_spec, mean_value, sort_order, decimal_places, is_check_column, is_reference)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       req.params.id,
@@ -263,7 +275,9 @@ router.post("/:id/points", attachRole, requireRole("qc", "admin", "engineer"), (
       min_spec ?? null,
       mean_value ?? null,
       nextOrder,
-      clampDecimalPlaces(decimal_places)
+      clampDecimalPlaces(decimal_places),
+      is_check_column ? 1 : 0,
+      is_reference ? 1 : 0
     );
 
   const point = db.prepare("SELECT * FROM balloon_points WHERE id = ?").get(result.lastInsertRowid);
@@ -271,14 +285,15 @@ router.post("/:id/points", attachRole, requireRole("qc", "admin", "engineer"), (
 });
 
 // PUT /api/drawings/points/:id  (edit an existing point's Find#, spec, or decimal places)
-router.put("/points/:id", attachRole, requireRole("qc", "admin", "engineer"), (req, res) => {
-  const { balloon_number, max_spec, min_spec, mean_value, decimal_places } = req.body;
+router.put("/points/:id", attachRole, requireRole("qc", "admin", "engineer", "supervisor"), (req, res) => {
+  const { balloon_number, max_spec, min_spec, mean_value, decimal_places, is_check_column, is_reference } = req.body;
   if (!balloon_number) return res.status(400).json({ error: "balloon_number is required" });
 
   const result = db
     .prepare(
       `UPDATE balloon_points
-       SET balloon_number = ?, max_spec = ?, min_spec = ?, mean_value = ?, decimal_places = ?
+       SET balloon_number = ?, max_spec = ?, min_spec = ?, mean_value = ?, decimal_places = ?, is_check_column = ?,
+           is_reference = ?
        WHERE id = ?`
     )
     .run(
@@ -287,6 +302,8 @@ router.put("/points/:id", attachRole, requireRole("qc", "admin", "engineer"), (r
       min_spec ?? null,
       mean_value ?? null,
       clampDecimalPlaces(decimal_places),
+      is_check_column ? 1 : 0,
+      is_reference ? 1 : 0,
       req.params.id
     );
 
@@ -295,7 +312,7 @@ router.put("/points/:id", attachRole, requireRole("qc", "admin", "engineer"), (r
 });
 
 // DELETE /api/drawings/points/:id  (blocked if measurements already reference it)
-router.delete("/points/:id", attachRole, requireRole("qc", "admin"), (req, res) => {
+router.delete("/points/:id", attachRole, requireRole("qc", "admin", "supervisor"), (req, res) => {
   try {
     const result = db.prepare("DELETE FROM balloon_points WHERE id = ?").run(req.params.id);
     if (result.changes === 0) return res.status(404).json({ error: "Point not found" });

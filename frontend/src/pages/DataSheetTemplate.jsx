@@ -1,15 +1,25 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, useParams, useSearchParams } from "react-router-dom";
+import { useParams, useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
 import { useAuth } from "../context/AuthContext";
 import { handleGridArrowNav } from "../lib/gridNav";
-import { toStoredNumber } from "../lib/numeric";
+import { isParenthesized, toStoredNumber } from "../lib/numeric";
 import DecimalCell from "../components/DecimalCell";
+import PageNav from "../components/PageNav";
 import { useConfirm } from "../hooks/useConfirm";
 
-const API_ORIGIN = (import.meta.env.VITE_API_URL || `http://${window.location.hostname}:3001/api`).replace(/\/api$/, "");
+const API_ORIGIN = (
+  import.meta.env.VITE_API_URL || `${window.location.protocol}//${window.location.hostname}:3001/api`
+).replace(/\/api$/, "");
 
-const EMPTY_SPEC = { balloon_number: "", max_spec: "", min_spec: "", mean_value: "", decimal_places: "3" };
+const EMPTY_SPEC = {
+  balloon_number: "",
+  max_spec: "",
+  min_spec: "",
+  mean_value: "",
+  decimal_places: "3",
+  is_check_column: false,
+};
 
 // Matches the server-side requireRole("qc", "admin", "engineer") guard on
 // every write route in backend/src/routes/drawings.js -- the Template
@@ -18,7 +28,7 @@ const EMPTY_SPEC = { balloon_number: "", max_spec: "", min_spec: "", mean_value:
 // change. Operators still see every spec read-only on the Data Sheet's own
 // Measurements grid, so there's no read-only mode to build here -- they
 // just never need this page.
-const TEMPLATE_EDIT_ROLES = ["qc", "admin", "engineer"];
+const TEMPLATE_EDIT_ROLES = ["qc", "admin", "engineer", "supervisor"];
 
 function isPdf(path) {
   return path?.toLowerCase().endsWith(".pdf");
@@ -45,6 +55,7 @@ export default function DataSheetTemplate() {
   // context and falling back to a default that doesn't match.
   const type = searchParams.get("type") || (operationId ? "in_process" : "final");
   const [part, setPart] = useState(null);
+  const [clientName, setClientName] = useState(null);
   const [operation, setOperation] = useState(null);
   const [drawings, setDrawings] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
@@ -62,19 +73,21 @@ export default function DataSheetTemplate() {
   // remember to flip a per-sheet checkbox.
   const [hundredPercent, setHundredPercent] = useState(false);
   const [savingHundredPercent, setSavingHundredPercent] = useState(false);
+  // Same inheritance as hundredPercent above -- adds Qty/Machine #/Comment to
+  // each sample row on the Data Sheet instead of the usual shared sampling
+  // plan, for a periodic check that rotates through several machines.
+  const [machineLogMode, setMachineLogMode] = useState(false);
+  const [savingMachineLogMode, setSavingMachineLogMode] = useState(false);
 
-  const [specEdits, setSpecEdits] = useState({}); // pointId -> { balloon_number, max_spec, min_spec, mean_value }
-  // pointIds the user has explicitly un-checked "OK / Not OK" for while all
-  // three specs are still blank -- without this, the checkbox (derived from
-  // "are all specs blank") would immediately snap back to checked the moment
-  // they unchecked it, since blank fields alone can't tell "meant to be a
-  // check" apart from "numeric column, spec not typed in yet". Purely a UI
-  // nicety for this editing session -- never saved, and irrelevant again the
-  // instant any spec value is actually typed.
-  const [forcedNumeric, setForcedNumeric] = useState(new Set());
+  const [specEdits, setSpecEdits] = useState({}); // pointId -> { balloon_number, max_spec, min_spec, mean_value, is_check_column }
   const [newColumns, setNewColumns] = useState([]); // [{ id: <temp negative id> }, ...] — not yet persisted
   const [saving, setSaving] = useState(false);
   const [pointMenu, setPointMenu] = useState(null); // { pointId, x, y }
+  // Right-click a Find# column -> "Format decimals..." -- an Excel-style
+  // "Format Cells" dialog instead of a dedicated always-visible Decimals
+  // row eating a whole line of the grid for every column.
+  const [formattingPointId, setFormattingPointId] = useState(null);
+  const [decimalsInput, setDecimalsInput] = useState("");
   const nextTempId = useRef(0);
   const [confirm, confirmDialog] = useConfirm();
   // Buckets (part, or part+operation) we've already attempted to auto-provision
@@ -134,6 +147,13 @@ export default function DataSheetTemplate() {
     }
   }, [partId, operationId, canEdit]);
 
+  // For the breadcrumb trail only -- getPart doesn't include the client's
+  // name, just its id (see OperationsList.jsx, same reasoning).
+  useEffect(() => {
+    if (!part?.client_id) return;
+    api.getClient(part.client_id).then((c) => setClientName(c.name)).catch(() => {});
+  }, [part?.client_id]);
+
   useEffect(() => {
     if (!selectedId) {
       setDrawing(null);
@@ -145,15 +165,19 @@ export default function DataSheetTemplate() {
         setDrawing(d);
         setRevisionEdit(d.revision_label ?? "");
         setHundredPercent(!!d.hundred_percent_inspection);
+        setMachineLogMode(!!d.machine_log_mode);
         setNewColumns([]);
-        setForcedNumeric(new Set());
         const specState = {};
         d.points.forEach((p) => {
+          // Reference dimensions come back as plain numbers + is_reference;
+          // re-wrap them in parentheses so the cell shows what was typed.
+          const spec = (v) => (v == null ? "" : p.is_reference ? `(${v})` : v);
           specState[p.id] = {
             balloon_number: p.balloon_number,
-            max_spec: p.max_spec ?? "",
-            min_spec: p.min_spec ?? "",
-            mean_value: p.mean_value ?? "",
+            max_spec: spec(p.max_spec),
+            min_spec: spec(p.min_spec),
+            mean_value: spec(p.mean_value),
+            is_check_column: !!p.is_check_column,
             decimal_places: String(p.decimal_places ?? 3),
           };
         });
@@ -249,34 +273,34 @@ export default function DataSheetTemplate() {
     }
   };
 
+  const handleToggleMachineLogMode = async (checked) => {
+    setMachineLogMode(checked); // optimistic -- it's just a checkbox
+    setSavingMachineLogMode(true);
+    setError(null);
+    try {
+      const updated = await api.updateDrawing(drawing.id, { machine_log_mode: checked });
+      setDrawing(updated);
+    } catch (e) {
+      setMachineLogMode(!checked);
+      setError(e.message);
+    } finally {
+      setSavingMachineLogMode(false);
+    }
+  };
+
   const handleSpecChange = (pointId, field, value) => {
     setSpecEdits((prev) => ({ ...prev, [pointId]: { ...prev[pointId], [field]: value } }));
   };
 
-  // A column with no Max/MEAN/Min spec at all is a pass/fail "OK / Not OK"
-  // check at capture time (see isSpecless in lib/passfail.js) -- this just
-  // makes that existing rule an explicit, editable checkbox here instead of
-  // an implicit "leave everything blank" convention.
-  const isCheckColumn = (pointId) => {
-    const edit = specEdits[pointId];
-    const blank = !edit?.max_spec && !edit?.min_spec && !edit?.mean_value;
-    return blank && !forcedNumeric.has(pointId);
-  };
+  // Whether this column captures as a pass/fail "OK / Not OK" check at
+  // capture time (see isSpecless in lib/passfail.js) -- an explicit flag,
+  // independent of whatever Max/MEAN/Min happen to be typed in below, so a
+  // check column can still carry a documented reference spec (e.g. a
+  // Go/No-Go gauge's nominal size) without switching to numeric capture.
+  const isCheckColumn = (pointId) => !!specEdits[pointId]?.is_check_column;
 
   const handleToggleCheck = (pointId, checked) => {
-    if (checked) {
-      setForcedNumeric((prev) => {
-        const next = new Set(prev);
-        next.delete(pointId);
-        return next;
-      });
-      setSpecEdits((prev) => ({
-        ...prev,
-        [pointId]: { ...prev[pointId], max_spec: "", min_spec: "", mean_value: "" },
-      }));
-    } else {
-      setForcedNumeric((prev) => new Set(prev).add(pointId));
-    }
+    setSpecEdits((prev) => ({ ...prev, [pointId]: { ...prev[pointId], is_check_column: checked } }));
   };
 
   const handleAddColumn = () => {
@@ -288,6 +312,18 @@ export default function DataSheetTemplate() {
   const handlePointContextMenu = (e, pointId) => {
     e.preventDefault();
     setPointMenu({ pointId, x: e.clientX, y: e.clientY });
+  };
+
+  const openFormatDecimals = (pointId) => {
+    setPointMenu(null);
+    setDecimalsInput(specEdits[pointId]?.decimal_places ?? "3");
+    setFormattingPointId(pointId);
+  };
+
+  const handleApplyDecimals = () => {
+    const value = decimalsInput.trim();
+    handleSpecChange(formattingPointId, "decimal_places", value === "" ? "3" : value);
+    setFormattingPointId(null);
   };
 
   const handleDeletePoint = async (pointId) => {
@@ -329,6 +365,12 @@ export default function DataSheetTemplate() {
     }
   };
 
+  // Typing any of a column's specs in parentheses, e.g. "(5.18)", marks the
+  // whole Find# as a reference dimension -- the number itself is stored
+  // plain (see toStoredNumber) and the parentheses are shown back on display.
+  const isReferenceEdit = (edit) =>
+    [edit.max_spec, edit.min_spec, edit.mean_value].some(isParenthesized);
+
   // Single save: creates any draft columns that got a Find# label (blank
   // drafts are dropped), and persists spec/label edits on existing columns.
   const handleSave = async () => {
@@ -345,6 +387,8 @@ export default function DataSheetTemplate() {
           min_spec: toStoredNumber(edit.min_spec),
           mean_value: toStoredNumber(edit.mean_value),
           decimal_places: edit.decimal_places,
+          is_check_column: edit.is_check_column,
+          is_reference: isReferenceEdit(edit),
         });
       }
 
@@ -358,6 +402,8 @@ export default function DataSheetTemplate() {
             min_spec: toStoredNumber(edit.min_spec),
             mean_value: toStoredNumber(edit.mean_value),
             decimal_places: edit.decimal_places,
+            is_check_column: edit.is_check_column,
+            is_reference: isReferenceEdit(edit),
           });
         })
       );
@@ -374,19 +420,28 @@ export default function DataSheetTemplate() {
 
   const fileUrl = drawing ? `${API_ORIGIN}${drawing.image_path}` : null;
   const allColumns = drawing ? [...drawing.points, ...newColumns] : [];
+  const backTo = operationId
+    ? `/parts/${partId}/operations/${operationId}?type=${type}`
+    : `/parts/${partId}/inspections${type !== "final" ? `?type=${type}` : ""}`;
+  const partsHref = part ? `/clients/${part.client_id}/parts${type !== "final" ? `?type=${type}` : ""}` : "/clients";
+  // The "Part" breadcrumb segment is one level above backTo when there's an
+  // operation involved (backTo goes straight to this one operation, but the
+  // Part level should go to the Operations list, same as OperationDetail.jsx).
+  const partLevelHref = operationId ? `/parts/${partId}/operations?type=${type}` : backTo;
 
   return (
     <div className="page">
-      <Link
-        to={
-          operationId
-            ? `/parts/${partId}/operations/${operationId}?type=${type}`
-            : `/parts/${partId}/inspections${type !== "final" ? `?type=${type}` : ""}`
-        }
-        className="back-link"
-      >
-        {operationId ? "← Operation" : "← Data Sheets"}
-      </Link>
+      <PageNav
+        backTo={backTo}
+        backLabel={operationId ? "Back to Operation" : "Back to Data Sheets"}
+        items={[
+          { label: "Home", to: "/" },
+          { label: clientName ?? "…", to: partsHref },
+          { label: part?.part_number ?? `Part #${partId}`, to: partLevelHref },
+          ...(operationId ? [{ label: operation?.name ?? "Operation", to: backTo }] : []),
+          { label: "Data Sheet Template" },
+        ]}
+      />
       <h1>
         Data Sheet Template — {part?.part_number ?? `Part #${partId}`}
         {operationId ? ` / ${operation?.name ?? "Operation"}` : ""}
@@ -398,85 +453,91 @@ export default function DataSheetTemplate() {
         </p>
       ) : (
         <>
-      <p className="muted">
-        Set up once per drawing revision. Every inspection for this part reuses these Find# columns automatically.
-      </p>
       {error && <p className="error" ref={errorRef}>{error}</p>}
 
-      <form className="inline-form" onSubmit={handleUpload}>
-        <input
-          type="file"
-          accept="image/*,application/pdf"
-          onChange={(e) => setFile(e.target.files[0])}
-        />
-        <button type="submit" disabled={uploading}>
-          {drawings.length === 0 ? "Upload drawing" : "Upload new revision"}
-        </button>
-      </form>
+      <section className="card template-section">
+        <h2>Drawing</h2>
+        <p className="muted">
+          Set up once per drawing revision. Every inspection for this part reuses these Find# columns automatically.
+        </p>
 
-      {drawing && (
-        <>
-          <div className="inline-form">
-            <label>
-              Revision (as printed on the drawing):{" "}
-              <input
-                className="spec-input"
-                value={revisionEdit}
-                onChange={(e) => setRevisionEdit(e.target.value)}
-                placeholder="e.g. B"
-              />
-            </label>
-            <button type="button" onClick={handleSaveRevision} disabled={savingRevision}>
-              Save revision
-            </button>
-          </div>
+        <form className="inline-form" onSubmit={handleUpload}>
+          <input
+            type="file"
+            accept="image/*,application/pdf"
+            onChange={(e) => setFile(e.target.files[0])}
+          />
+          <button type="submit" disabled={uploading}>
+            {drawings.length === 0 ? "Upload drawing" : "Upload new revision"}
+          </button>
+        </form>
 
-          {type === "in_process" && (
-            <label className="inline-form hundred-percent-toggle">
-              <input
-                type="checkbox"
-                checked={hundredPercent}
-                disabled={savingHundredPercent}
-                onChange={(e) => handleToggleHundredPercent(e.target.checked)}
-              />
-              100% Inspection (every piece checked, not a sampling plan) — every new Data Sheet for this operation
-              starts this way automatically
-            </label>
-          )}
+        {drawing && (
+          <>
+            <div className="inline-form">
+              <label>
+                Revision (as printed on the drawing):{" "}
+                <input
+                  className="spec-input"
+                  value={revisionEdit}
+                  onChange={(e) => setRevisionEdit(e.target.value)}
+                  placeholder="e.g. B"
+                />
+              </label>
+              <button type="button" onClick={handleSaveRevision} disabled={savingRevision}>
+                Save revision
+              </button>
+            </div>
 
-          {drawing.image_path ? (
-            <>
+            {type === "in_process" && (
+              <label className="inline-form hundred-percent-toggle">
+                <input
+                  type="checkbox"
+                  checked={hundredPercent}
+                  disabled={savingHundredPercent}
+                  onChange={(e) => handleToggleHundredPercent(e.target.checked)}
+                />
+                100% Inspection (every piece checked, not a sampling plan) — every new Data Sheet for this operation
+                starts this way automatically
+              </label>
+            )}
+
+            {type === "in_process" && (
+              <label className="inline-form hundred-percent-toggle">
+                <input
+                  type="checkbox"
+                  checked={machineLogMode}
+                  disabled={savingMachineLogMode}
+                  onChange={(e) => handleToggleMachineLogMode(e.target.checked)}
+                />
+                Machine log mode (periodic check log — each sample row logs its own Qty, Machine #, and Comment) —
+                every new Data Sheet for this operation starts this way automatically
+              </label>
+            )}
+
+            {drawing.image_path ? (
               <div className="actions-row">
-                <a href={fileUrl} target="_blank" rel="noreferrer" className="secondary-link open-full-size">
-                  Open full size {isPdf(drawing.image_path) ? "(PDF)" : ""}
-                </a>
+                <button type="button" onClick={() => window.open(fileUrl, "_blank", "noopener,noreferrer")}>
+                  View Drawing {isPdf(drawing.image_path) ? "(PDF)" : ""}
+                </button>
                 <button onClick={() => handleDelete(drawing.id)} disabled={deleting} className="reject">
                   Delete this revision
                 </button>
               </div>
+            ) : (
+              <p className="muted">
+                No drawing image uploaded yet for this revision — you can still set up Find# columns below, and
+                upload an image any time using the form above.
+              </p>
+            )}
+          </>
+        )}
+      </section>
 
-              {isPdf(drawing.image_path) ? (
-                <>
-                  <p className="muted">
-                    Inline preview below may not render in every viewer (e.g. VS Code's Simple Browser). If it looks
-                    blank or shows an error, use "Open full size" above — it opens the PDF directly, which every real
-                    browser tab renders natively.
-                  </p>
-                  <embed src={fileUrl} type="application/pdf" className="drawing-preview drawing-preview-pdf" />
-                </>
-              ) : (
-                <img src={fileUrl} alt="Balloon drawing" className="drawing-preview" />
-              )}
-            </>
-          ) : (
-            <p className="muted">
-              No drawing image uploaded yet for this revision — you can still set up Find# columns below, and upload
-              an image any time using the form above.
-            </p>
-          )}
-
+      {drawing && (
+        <section className="card template-section">
           <h2>Find# Columns ({drawing.points.length})</h2>
-          <p className="muted">Right-click a Find# column to delete it.</p>
+          <p className="muted">Right-click a Find# column to delete it or set its decimal places.</p>
           <div className="table-scroll">
             <table className="capture-table capture-table-transposed">
               <thead>
@@ -519,7 +580,6 @@ export default function DataSheetTemplate() {
                         value={specEdits[p.id]?.max_spec ?? ""}
                         onChange={(v) => handleSpecChange(p.id, "max_spec", v)}
                         decimals={Number(specEdits[p.id]?.decimal_places ?? 3)}
-                        disabled={isCheckColumn(p.id)}
                       />
                     </td>
                   ))}
@@ -532,7 +592,6 @@ export default function DataSheetTemplate() {
                         value={specEdits[p.id]?.mean_value ?? ""}
                         onChange={(v) => handleSpecChange(p.id, "mean_value", v)}
                         decimals={Number(specEdits[p.id]?.decimal_places ?? 3)}
-                        disabled={isCheckColumn(p.id)}
                       />
                     </td>
                   ))}
@@ -545,22 +604,6 @@ export default function DataSheetTemplate() {
                         value={specEdits[p.id]?.min_spec ?? ""}
                         onChange={(v) => handleSpecChange(p.id, "min_spec", v)}
                         decimals={Number(specEdits[p.id]?.decimal_places ?? 3)}
-                        disabled={isCheckColumn(p.id)}
-                      />
-                    </td>
-                  ))}
-                </tr>
-                <tr className="spec-row">
-                  <td>Decimals</td>
-                  {allColumns.map((p) => (
-                    <td key={p.id}>
-                      <input
-                        className="spec-input"
-                        inputMode="numeric"
-                        value={specEdits[p.id]?.decimal_places ?? "3"}
-                        onChange={(e) => handleSpecChange(p.id, "decimal_places", e.target.value)}
-                        onKeyDown={handleGridArrowNav}
-                        disabled={isCheckColumn(p.id)}
                       />
                     </td>
                   ))}
@@ -574,17 +617,45 @@ export default function DataSheetTemplate() {
               Save Template
             </button>
           </div>
-        </>
+        </section>
       )}
         </>
       )}
 
       {pointMenu && (
         <ul className="context-menu" style={{ top: pointMenu.y, left: pointMenu.x }}>
+          <li onClick={() => openFormatDecimals(pointMenu.pointId)}>Format decimals…</li>
           <li className="context-menu-danger" onClick={() => handleDeletePoint(pointMenu.pointId)}>
             Delete
           </li>
         </ul>
+      )}
+      {formattingPointId != null && (
+        <div className="confirm-overlay" onClick={() => setFormattingPointId(null)}>
+          <div className="confirm-box" onClick={(e) => e.stopPropagation()}>
+            <p>
+              Decimal places for Find# "{specEdits[formattingPointId]?.balloon_number || "—"}"
+            </p>
+            <input
+              type="number"
+              min="0"
+              max="6"
+              className="spec-input"
+              value={decimalsInput}
+              onChange={(e) => setDecimalsInput(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleApplyDecimals()}
+              autoFocus
+            />
+            <div className="confirm-actions">
+              <button type="button" className="secondary-btn" onClick={() => setFormattingPointId(null)}>
+                Cancel
+              </button>
+              <button type="button" onClick={handleApplyDecimals}>
+                Apply
+              </button>
+            </div>
+          </div>
+        </div>
       )}
       {confirmDialog}
     </div>

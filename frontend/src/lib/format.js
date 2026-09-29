@@ -27,7 +27,47 @@ export function resultLabel(result) {
   return RESULT_LABELS[result] ?? result;
 }
 
-export const ROLE_LABELS = { qc: "QC Inspector", operator: "Operator", engineer: "Engineer", admin: "Admin" };
+// inspections.type -- see CLAUDE.md's data model notes: 'quote'/'other'
+// exist in the CHECK constraint but aren't reachable from the UI, so they're
+// not listed here.
+export const TYPE_LABELS = {
+  incoming: "Incoming",
+  setup: "Set-up",
+  in_process: "In-Process",
+  final: "Final",
+  samples: "Samples",
+};
+
+export function typeLabel(type) {
+  return TYPE_LABELS[type] ?? type;
+}
+
+// Display text only -- the underlying role value ('engineer' etc., see
+// schema.sql's users.role CHECK) is unchanged, so this is safe to reword
+// anytime without a migration.
+export const ROLE_LABELS = {
+  qc: "QC Inspector",
+  operator: "Operator",
+  engineer: "Quality Analytics",
+  supervisor: "Supervisor",
+  admin: "Admin",
+};
+
+// Absolute date + time for a SQLite UTC "YYYY-MM-DD HH:MM:SS" timestamp --
+// same parsing as timeAgo above, just rendered as a fixed date instead of a
+// relative one (e.g. inspection sheet header dates, user last-login/created).
+export function formatDateTime(value) {
+  if (!value) return "—";
+  const d = new Date(value.replace(" ", "T") + "Z");
+  if (Number.isNaN(d.getTime())) return value;
+  return d.toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
 
 // Time-of-day greeting for the Home dashboard header.
 export function greeting() {

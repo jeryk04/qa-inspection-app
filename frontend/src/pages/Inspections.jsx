@@ -1,10 +1,18 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
+import { useAuth } from "../context/AuthContext";
 import { inspectionLabel, resultStatus, resultLabel } from "../lib/format";
 import { useConfirm } from "../hooks/useConfirm";
 import PageNav from "../components/PageNav";
 import TemplateEditLink from "../components/TemplateEditLink";
+
+// This deletes an already-saved inspection -- matches backend/src/routes/
+// inspections.js's requireRole("admin", "supervisor") on DELETE /:id and
+// OperationDetail.jsx's own guard for the same action scoped to an
+// operation. Deliberately narrower than QC's usual access: QC can
+// create/edit/sign a Data Sheet but not erase one.
+const CAN_DELETE_ROLES = ["admin", "supervisor"];
 
 // The "Data Sheet" folder at the top is the entry point an inspector opens
 // every time an inspection is needed: it resumes the currently open (in
@@ -13,6 +21,8 @@ import TemplateEditLink from "../components/TemplateEditLink";
 export default function Inspections() {
   const { partId } = useParams();
   const navigate = useNavigate();
+  const { user } = useAuth();
+  const canDelete = CAN_DELETE_ROLES.includes(user?.role);
   const [searchParams] = useSearchParams();
   // Defaults to "final" -- the original, still-only-supported value for the
   // normal QC path (see Clients.jsx for where a non-default type comes from).
@@ -126,13 +136,13 @@ export default function Inspections() {
       {error && <p className="error">{error}</p>}
 
       <h2>Inspection History</h2>
-      <p className="muted">Right-click an inspection to delete it.</p>
+      {canDelete && <p className="muted">Right-click an inspection to delete it.</p>}
       {groupByYear(inspections).map(([year, yearInspections]) => (
         <div key={year}>
           <h3>{year}</h3>
           <ul className="card-list">
             {yearInspections.map((i) => (
-              <li key={i.id} className="card" onContextMenu={(e) => handleContextMenu(e, i)}>
+              <li key={i.id} className="card" onContextMenu={canDelete ? (e) => handleContextMenu(e, i) : undefined}>
                 <Link to={`/inspections/${i.id}`}>
                   <strong>{inspectionLabel(i)}</strong>
                   <span className="muted"> · </span>

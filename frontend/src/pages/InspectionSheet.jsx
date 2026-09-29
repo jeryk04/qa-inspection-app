@@ -1,22 +1,26 @@
 import { useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useLocation, useParams } from "react-router-dom";
+import { formatSpec } from "../lib/numeric";
 import { api } from "../api/client";
-import { resultStatus, resultLabel } from "../lib/format";
+import { resultStatus, resultLabel, formatDateTime } from "../lib/format";
 import { isSpecless, summarizeCheckPoint } from "../lib/passfail";
 import logo from "../assets/logo.png";
 
 // Same fallback pattern as api/client.js -- not exported from there, so
 // repeated locally (matches InspectionCapture.jsx/DataSheetTemplate.jsx).
-const BASE_URL = import.meta.env.VITE_API_URL || `http://${window.location.hostname}:3001/api`;
+const BASE_URL = import.meta.env.VITE_API_URL || `${window.location.protocol}//${window.location.hostname}:3001/api`;
 
-// Matches the schema's `type` enum — Phase 1 only ever creates 'final'.
+// Only the types actually reachable from the UI (plus 'samples', which has
+// no paper-form checkbox of its own -- see schema.sql's inspections.type
+// comment -- but still gets a chip here like every other type). 'quote' and
+// 'other' are real schema values but aren't reachable from the UI, so they
+// never get a chip.
 const TYPE_LABELS = [
-  ["quote", "Quote"],
   ["incoming", "Incoming"],
-  ["setup", "1st Article"],
+  ["setup", "Set Up"],
   ["in_process", "In Process"],
   ["final", "Final"],
-  ["other", "Other"],
+  ["samples", "Samples"],
 ];
 
 const TYPE_TITLES = {
@@ -26,6 +30,7 @@ const TYPE_TITLES = {
   in_process: "In-Process Inspection Data Sheet",
   final: "Final Inspection Data Sheet",
   other: "Inspection Data Sheet",
+  samples: "Samples Inspection Data Sheet",
 };
 
 const COMPANY = {
@@ -36,17 +41,16 @@ const COMPANY = {
   fax: "860-434-1371",
 };
 
-function formatDateTime(value) {
-  if (!value) return "—";
-  const d = new Date(value.replace(" ", "T") + "Z");
-  if (Number.isNaN(d.getTime())) return value;
-  return d.toLocaleString(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
+// Mirrors backend/src/pdf/inspectionSheet.js's withPlannedSamples -- rows
+// 1..sampling_plan_n show even before anything's been measured, so a
+// freshly-planned, still-empty sheet can be viewed/printed blank and filled
+// in on paper first.
+function withPlannedSamples(measuredSamples, inspection) {
+  const target = Math.floor(Number(inspection.sampling_plan_n));
+  if (!Number.isFinite(target) || target <= 0) return measuredSamples;
+  const set = new Set(measuredSamples);
+  for (let i = 1; i <= target; i++) set.add(i);
+  return [...set].sort((a, b) => a - b);
 }
 
 function CheckIcon() {
@@ -90,18 +94,30 @@ function DataSheetReport({ inspection }) {
     inspection.measurements.map((m) => [`${m.balloon_point_id}:${m.sample_number}`, m])
   );
   const signature = inspection.signature;
+  // machine_log_mode's per-row Qty/Machine #/Comment (see schema.sql) --
+  // frozen on the inspection at creation, same as hundred_percent_inspection.
+  const machineLogMode = !!inspection.machine_log_mode;
+  const sampleRowsByNumber = Object.fromEntries(
+    (inspection.sampleRows || []).map((r) => [r.sample_number, r])
+  );
 
   // A specless (check) column reports as a qty-inspected/qty-rejected
-  // summary instead of one row per piece when either (a) it has an explicit
+  // summary instead of one row per piece only when (a) it has an explicit
   // point-summary (hundred_percent_inspection mode -- possibly with zero
-  // measurements rows to fall back on) or (b) it has more than a handful of
-  // real per-sample rows (the older "Fill + Mark OK" path). A small sample
-  // count still lists every row, same as a numeric column always does.
+  // measurements rows to fall back on), (b) the sheet is a 100% inspection
+  // (flag set, or the sampling plan covers the whole quantity), or (c) the
+  // sheet is nothing but check columns with more than a handful of rows. A
+  // check sampled alongside measured dimensions on a normal sampling plan
+  // stays in the grid, one row per sample, lined up with those dimensions.
   const SUMMARIZE_THRESHOLD = 10;
   const hasExplicitSummary = (p) => (inspection.pointSummaries || []).some((s) => s.balloon_point_id === p.id);
-  const summaryPoints = points.filter(
-    (p) => isSpecless(p) && (hasExplicitSummary(p) || samples.length > SUMMARIZE_THRESHOLD)
-  );
+  const planN = Number(inspection.sampling_plan_n);
+  const qty = Number(inspection.quantity);
+  const isHundredPercent =
+    !!inspection.hundred_percent_inspection || (qty > 0 && planN >= qty);
+  const onlyCheckColumns = points.length > 0 && points.every(isSpecless);
+  const summarizeChecks = isHundredPercent || (onlyCheckColumns && samples.length > SUMMARIZE_THRESHOLD);
+  const summaryPoints = points.filter((p) => isSpecless(p) && (hasExplicitSummary(p) || summarizeChecks));
   const gridPoints = points.filter((p) => !summaryPoints.includes(p));
   const summaryRows = summaryPoints.map((point) => ({ point, ...summarizeCheckPoint(point, inspection) }));
   // The Reject Notes column is just a wall of "—" on a sheet where
@@ -114,13 +130,23 @@ function DataSheetReport({ inspection }) {
   // piece) -- rendering the full sample range here would print/show mostly
   // "—" rows. Re-derive the row list from only the measurements that
   // actually belong to a still-gridded (numeric) column.
-  const gridSamples = [
-    ...new Set(
-      inspection.measurements
-        .filter((m) => gridPoints.some((p) => p.id === m.balloon_point_id))
-        .map((m) => m.sample_number)
-    ),
-  ].sort((a, b) => a - b);
+  //
+  // But when there ARE no specless columns narrowing things down, show the
+  // full planned row count (sampling_plan_n) even before anything's been
+  // measured -- a sample row otherwise only exists once a value's been typed
+  // into it (see InspectionCapture.jsx's saveMeasurementsNow), so a
+  // freshly-planned, still-empty sheet would otherwise print/view as zero
+  // rows instead of blank ones ready to fill in on paper.
+  const gridSamples =
+    summaryPoints.length === 0
+      ? withPlannedSamples(samples, inspection)
+      : [
+          ...new Set(
+            inspection.measurements
+              .filter((m) => gridPoints.some((p) => p.id === m.balloon_point_id))
+              .map((m) => m.sample_number)
+          ),
+        ].sort((a, b) => a - b);
 
   return (
     <div className="sheet">
@@ -166,8 +192,8 @@ function DataSheetReport({ inspection }) {
                 ["Customer", inspection.customer || inspection.client_name],
                 ["Job# / WO#", inspection.job_number || "—"],
               ]),
-          ["Sampling Plan N", inspection.sampling_plan_n ?? "—"],
-          ["Sampling Plan C", inspection.sampling_plan_c ?? "—"],
+          ["Sampling Plan", inspection.sampling_plan_n ?? "—"],
+          ["Total Rejected", inspection.sampling_plan_c ?? "—"],
           ["By", inspection.inspector || "—"],
           ["Date", inspection.date ? inspection.date.slice(0, 10) : "—"],
         ].map(([label, value]) => (
@@ -234,33 +260,67 @@ function DataSheetReport({ inspection }) {
             <thead>
               <tr>
                 <th>Find #</th>
+                {machineLogMode && (
+                  <>
+                    <th>Qty</th>
+                    <th>Machine #</th>
+                  </>
+                )}
                 {gridPoints.map((p) => (
                   <th key={p.id}>{p.balloon_number}</th>
                 ))}
+                {machineLogMode && <th>Comment</th>}
               </tr>
             </thead>
             <tbody>
               <tr className="sheet-spec-row">
                 <td>Max. Spec.</td>
+                {machineLogMode && (
+                  <>
+                    <td></td>
+                    <td></td>
+                  </>
+                )}
                 {gridPoints.map((p) => (
-                  <td key={p.id}>{p.max_spec != null ? p.max_spec.toFixed(p.decimal_places ?? 3) : "—"}</td>
+                  <td key={p.id}>{formatSpec(p.max_spec, p) ?? "—"}</td>
                 ))}
+                {machineLogMode && <td></td>}
               </tr>
               <tr className="sheet-spec-row">
                 <td>MEAN</td>
+                {machineLogMode && (
+                  <>
+                    <td></td>
+                    <td></td>
+                  </>
+                )}
                 {gridPoints.map((p) => (
-                  <td key={p.id}>{p.mean_value != null ? p.mean_value.toFixed(p.decimal_places ?? 3) : "—"}</td>
+                  <td key={p.id}>{formatSpec(p.mean_value, p) ?? "—"}</td>
                 ))}
+                {machineLogMode && <td></td>}
               </tr>
               <tr className="sheet-spec-row sheet-spec-row-last">
                 <td>Min. Spec.</td>
+                {machineLogMode && (
+                  <>
+                    <td></td>
+                    <td></td>
+                  </>
+                )}
                 {gridPoints.map((p) => (
-                  <td key={p.id}>{p.min_spec != null ? p.min_spec.toFixed(p.decimal_places ?? 3) : "—"}</td>
+                  <td key={p.id}>{formatSpec(p.min_spec, p) ?? "—"}</td>
                 ))}
+                {machineLogMode && <td></td>}
               </tr>
               {gridSamples.map((s, i) => (
                 <tr key={s} className={i % 2 === 1 ? "sheet-row-alt" : ""}>
                   <td>{Number.isInteger(s) ? s : s.toFixed(1)}</td>
+                  {machineLogMode && (
+                    <>
+                      <td>{sampleRowsByNumber[s]?.qty ?? ""}</td>
+                      <td>{sampleRowsByNumber[s]?.machine_number || ""}</td>
+                    </>
+                  )}
                   {gridPoints.map((p) => {
                     const cell = grid[`${p.id}:${s}`];
                     const within = cell?.within_tolerance;
@@ -272,10 +332,11 @@ function DataSheetReport({ inspection }) {
                           ? typeof cell.measured_value === "number"
                             ? cell.measured_value.toFixed(p.decimal_places ?? 3)
                             : cell.measured_value
-                          : "—"}
+                          : ""}
                       </td>
                     );
                   })}
+                  {machineLogMode && <td>{sampleRowsByNumber[s]?.comment || ""}</td>}
                 </tr>
               ))}
             </tbody>
@@ -315,6 +376,9 @@ function DataSheetReport({ inspection }) {
 
 export default function InspectionSheet() {
   const { inspectionId } = useParams();
+  // Carries the Data Sheet's returnTo (see InspectionCapture) through
+  // "Back to capture", so its back arrow still returns to the dashboard etc.
+  const location = useLocation();
   const [inspection, setInspection] = useState(null);
   const [error, setError] = useState(null);
 
@@ -333,7 +397,7 @@ export default function InspectionSheet() {
   return (
     <div className="page sheet-page">
       <div className="no-print actions-row">
-        <Link to={`/inspections/${inspectionId}`} className="back-link">
+        <Link to={`/inspections/${inspectionId}`} state={location.state} className="back-link">
           ← Back to capture
         </Link>
         <button onClick={() => window.open(`${BASE_URL}/inspections/${inspectionId}/pdf`, "_blank")}>

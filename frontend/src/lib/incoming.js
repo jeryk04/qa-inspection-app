@@ -14,7 +14,9 @@ export const INCOMING_CATEGORY_CLIENTS = {
   subcomponent: [
     "Subcomponent Part Numbers",
     "Alstom",
-    "Enviroment One",
+    // Was "Enviroment One" (typo) -- that duplicate customer row was merged
+    // into "Environment One Corp", which now holds its parts.
+    "Environment One Corp",
     "Kawasaki",
     "Liberty Pumps",
     "PMI",

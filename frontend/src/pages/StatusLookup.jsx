@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { Link } from "react-router-dom";
 import { api } from "../api/client";
+import PageNav from "../components/PageNav";
 import { resultStatus, resultLabel } from "../lib/format";
 
 export default function StatusLookup() {
@@ -28,9 +28,7 @@ export default function StatusLookup() {
 
   return (
     <div className="page">
-      <Link to="/" className="back-link">
-        ← Home
-      </Link>
+      <PageNav backTo="/" backLabel="Back to Home" items={[{ label: "Home", to: "/" }, { label: "Check Approval Status" }]} />
       <h1>Check Approval Status</h1>
 
       <form className="inline-form" onSubmit={handleSubmit}>

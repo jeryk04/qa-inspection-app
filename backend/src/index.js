@@ -57,6 +57,6 @@ app.use("/api/admin", requireAuth, attachRole, requireRole("admin"), adminRouter
 
 getOrCreateDevCert().then(({ key, cert }) => {
   https.createServer({ key, cert }, app).listen(PORT, () => {
-    console.log(`QA Inspection API running at https://localhost:${PORT}`);
+    console.log(`Inspection App API running at https://localhost:${PORT}`);
   });
 });

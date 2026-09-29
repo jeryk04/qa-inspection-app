@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
 import { api } from "../api/client";
+import PageNav from "../components/PageNav";
 import { useConfirm } from "../hooks/useConfirm";
 import { timeAgo } from "../lib/format";
 
@@ -51,9 +51,7 @@ export default function AdminTrash() {
 
   return (
     <div className="page">
-      <Link to="/" className="back-link">
-        ← Home
-      </Link>
+      <PageNav backTo="/" backLabel="Back to Home" items={[{ label: "Home", to: "/" }, { label: "Recently Deleted" }]} />
       <h1>Recently Deleted</h1>
       <p className="muted">Items deleted from the app can be restored here.</p>
 

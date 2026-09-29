@@ -7,10 +7,13 @@ import { useConfirm } from "../hooks/useConfirm";
 import PageNav from "../components/PageNav";
 import TemplateEditLink from "../components/TemplateEditLink";
 
-// Matches DataSheetTemplate.jsx's own guard and backend/src/routes/
-// inspections.js's requireRole("qc", "admin") on DELETE /:id.
-const TEMPLATE_EDIT_ROLES = ["qc", "admin", "engineer"];
-const CAN_DELETE_ROLES = ["qc", "admin"];
+// Matches DataSheetTemplate.jsx's own guard.
+const TEMPLATE_EDIT_ROLES = ["qc", "admin", "engineer", "supervisor"];
+// This deletes an already-saved inspection (not the operation) -- matches
+// backend/src/routes/inspections.js's requireRole("admin", "supervisor") on
+// DELETE /:id, deliberately narrower than every other role check on this
+// page: QC can create/edit/sign a Data Sheet but not erase one.
+const CAN_DELETE_ROLES = ["admin", "supervisor"];
 
 // Mirrors Inspections.jsx's "Data Sheet folder + history" structure, scoped
 // to one operation_id instead of a part's Final drawing. See Inspections.jsx
@@ -19,14 +22,14 @@ const CAN_DELETE_ROLES = ["qc", "admin"];
 // params (partId only vs. partId+operationId) and Inspections.jsx was left
 // untouched by design for this step.
 //
-// Generic over ?type= (in_process or setup) -- Set-up and In-Process each
-// have their own independent operations + Data Sheet Templates for the same
-// part (see schema.sql's operations.scope comment), so the operationId this
-// page is reached with is already scoped correctly by OperationsList.jsx;
-// this just needs ?type= to pick the matching Data Sheet history and label.
-// Defaults to "in_process" since that's the only type this page served
-// before Set-up Inspection was added.
-const TYPE_LABELS = { in_process: "In-Process", setup: "Set-up" };
+// Generic over ?type= (in_process, setup, or samples) -- Set-up, In-Process,
+// and Samples each have their own independent operations + Data Sheet
+// Templates for the same part (see schema.sql's operations.scope comment),
+// so the operationId this page is reached with is already scoped correctly
+// by OperationsList.jsx; this just needs ?type= to pick the matching Data
+// Sheet history and label. Defaults to "in_process" since that's the only
+// type this page served before Set-up Inspection was added.
+const TYPE_LABELS = { in_process: "In-Process", setup: "Set-up", samples: "Samples" };
 
 export default function OperationDetail() {
   const { partId, operationId } = useParams();

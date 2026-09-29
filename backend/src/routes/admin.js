@@ -2,6 +2,8 @@ const express = require("express");
 const bcrypt = require("bcryptjs");
 const db = require("../db");
 const { restoreEntity } = require("../lib/trash");
+const { PIN_LENGTH, isValidPin } = require("../lib/pin");
+const { isValidEmail } = require("../lib/email");
 
 // Mounted with requireAuth/attachRole/requireRole("admin") already applied
 // in index.js -- every route here is admin-only, so it's gated once at
@@ -49,7 +51,7 @@ router.delete("/trash/:id", (req, res) => {
 // GET /api/admin/users -- never returns password_hash.
 router.get("/users", (req, res) => {
   const users = db
-    .prepare("SELECT id, username, full_name, role, active, created_at FROM users ORDER BY full_name")
+    .prepare("SELECT id, username, full_name, role, active, last_login, email, created_at FROM users ORDER BY full_name")
     .all();
   const clientRows = db.prepare("SELECT user_id, client_id FROM user_clients").all();
   const clientIdsByUser = new Map();
@@ -60,22 +62,31 @@ router.get("/users", (req, res) => {
   res.json(users.map((u) => ({ ...u, client_ids: clientIdsByUser.get(u.id) || [] })));
 });
 
-// POST /api/admin/users  { username, password, full_name, role }
+// POST /api/admin/users  { username, password, full_name, role, email? }
 router.post("/users", (req, res) => {
-  const { username, password, full_name, role } = req.body;
+  const { username, password, full_name, role, email } = req.body;
   if (!username || !password || !full_name || !role) {
     return res.status(400).json({ error: "username, password, full_name, and role are required" });
+  }
+  if (!isValidPin(password)) {
+    return res.status(400).json({ error: `PIN must be exactly ${PIN_LENGTH} digits` });
+  }
+  const trimmedEmail = email?.trim() || null;
+  if (trimmedEmail && !isValidEmail(trimmedEmail)) {
+    return res.status(400).json({ error: "That doesn't look like a valid email address." });
   }
 
   try {
     const password_hash = bcrypt.hashSync(password, 10);
-    // Any admin-set password is a temporary one -- the account owner is
-    // forced to pick their own on first login (see auth.js's PUT /password).
+    // Any admin-set PIN is a temporary one -- the account owner is forced
+    // to pick their own on first login (see auth.js's PUT /password).
     const result = db
-      .prepare("INSERT INTO users (username, password_hash, full_name, role, must_change_password) VALUES (?, ?, ?, ?, 1)")
-      .run(username, password_hash, full_name, role);
+      .prepare(
+        "INSERT INTO users (username, password_hash, full_name, role, email, must_change_password) VALUES (?, ?, ?, ?, ?, 1)"
+      )
+      .run(username, password_hash, full_name, role, trimmedEmail);
     const user = db
-      .prepare("SELECT id, username, full_name, role, active, created_at FROM users WHERE id = ?")
+      .prepare("SELECT id, username, full_name, role, active, last_login, email, created_at FROM users WHERE id = ?")
       .get(result.lastInsertRowid);
     res.status(201).json({ ...user, client_ids: [] });
   } catch (err) {
@@ -86,9 +97,9 @@ router.post("/users", (req, res) => {
   }
 });
 
-// PUT /api/admin/users/:id  { full_name?, role?, active?, password? }
+// PUT /api/admin/users/:id  { full_name?, role?, active?, password?, email? }
 router.put("/users/:id", (req, res) => {
-  const { full_name, role, active, password } = req.body;
+  const { full_name, role, active, password, email } = req.body;
 
   const setClauses = [];
   const params = [];
@@ -104,7 +115,18 @@ router.put("/users/:id", (req, res) => {
     setClauses.push("active = ?");
     params.push(active ? 1 : 0);
   }
+  if (email !== undefined) {
+    const trimmedEmail = email?.trim() || null;
+    if (trimmedEmail && !isValidEmail(trimmedEmail)) {
+      return res.status(400).json({ error: "That doesn't look like a valid email address." });
+    }
+    setClauses.push("email = ?");
+    params.push(trimmedEmail);
+  }
   if (password) {
+    if (!isValidPin(password)) {
+      return res.status(400).json({ error: `PIN must be exactly ${PIN_LENGTH} digits` });
+    }
     setClauses.push("password_hash = ?", "must_change_password = 1");
     params.push(bcrypt.hashSync(password, 10));
   }
@@ -115,15 +137,17 @@ router.put("/users/:id", (req, res) => {
   }
 
   const user = db
-    .prepare("SELECT id, username, full_name, role, active, created_at FROM users WHERE id = ?")
+    .prepare("SELECT id, username, full_name, role, active, last_login, email, created_at FROM users WHERE id = ?")
     .get(req.params.id);
   if (!user) return res.status(404).json({ error: "User not found" });
   const clientIds = db.prepare("SELECT client_id FROM user_clients WHERE user_id = ?").all(req.params.id);
   res.json({ ...user, client_ids: clientIds.map((r) => r.client_id) });
 });
 
-// PUT /api/admin/users/:id/clients  { client_ids: [...] } -- informational
-// only (see schema.sql's user_clients comment); replaces the full set.
+// PUT /api/admin/users/:id/clients  { client_ids: [...] } -- for an Operator
+// account, this IS their real access list (see lib/operatorAccess.js and
+// schema.sql's user_clients comment) -- every other role is unrestricted by
+// customer regardless of what's set here. Replaces the full set.
 router.put("/users/:id/clients", (req, res) => {
   const { client_ids } = req.body;
   if (!Array.isArray(client_ids)) return res.status(400).json({ error: "client_ids must be an array" });

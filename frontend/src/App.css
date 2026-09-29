@@ -4,6 +4,8 @@
   --accent: #2f6690;
   --accent-bright: #24506f;
   --bg: #f5f6f8;
+  --surface: #ffffff;
+  --surface-alt: #fafbfc;
   --table-header-bg: #eef0f3;
   --ok: #1a7f4b;
   --ok-bg: #e6f4ec;
@@ -20,6 +22,45 @@
   --accent-tint: #e8f0f6;
   --radius: 6px;
   --shadow-lg: 0 8px 24px rgba(16, 24, 40, 0.14);
+  /* Lets the browser pick matching native chrome (checkboxes, <select>,
+     scrollbars, date pickers) for the active theme -- without this, those
+     controls would stay light even after every custom color below switches
+     to dark. Narrowed to "dark" below once that's the active theme. */
+  color-scheme: light;
+}
+
+/* Dark theme -- ThemeContext.jsx always sets data-theme="light" or "dark"
+   explicitly on <html> (no "follow the OS" option; that was confusing next
+   to an explicit Light choice since most devices default to light anyway).
+   --primary/--primary-light/--radius are deliberately absent below -- they're
+   used as a fixed dark brand color (chart tooltips) or a structural value,
+   not a surface that should react to theme. .sheet (the printable Data
+   Sheet, see InspectionSheet.jsx) is deliberately NOT themed -- it re-pins
+   every token below back to its light value in its own rule further down,
+   since it's a replica of a printed paper form and should always look like
+   paper, in dark mode or not. */
+:root[data-theme="dark"] {
+  --accent: #3f7cb0;
+  --accent-bright: #4f90c4;
+  --bg: #10151c;
+  --surface: #1a212b;
+  --surface-alt: #222b37;
+  --table-header-bg: #222b37;
+  --ok: #4ade80;
+  --ok-bg: #123420;
+  --fail: #f87171;
+  --fail-bg: #3a1518;
+  --warn: #f5c451;
+  --warn-bg: #3a2d0c;
+  --conditional: #7cb0e8;
+  --conditional-bg: #17283c;
+  --border: #2b3542;
+  --border-strong: #3d4a5b;
+  --text: #e7ebf1;
+  --text-muted: #94a1b3;
+  --accent-tint: #1c3348;
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.5);
+  color-scheme: dark;
 }
 
 * {
@@ -35,7 +76,7 @@ body {
 }
 
 .app-header {
-  background: white;
+  background: var(--surface);
   border-bottom: 1px solid var(--border);
   padding: 10px 24px;
   display: flex;
@@ -49,12 +90,20 @@ body {
 }
 
 .brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   color: var(--text);
   font-weight: 700;
   text-decoration: none;
   font-size: 17px;
   letter-spacing: 0.1px;
   padding: 8px 0;
+}
+
+.brand-mark {
+  border-radius: 7px;
+  flex-shrink: 0;
 }
 
 .main-nav {
@@ -88,7 +137,7 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  background: white;
+  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 999px;
   padding: 5px 12px 5px 5px;
@@ -146,7 +195,7 @@ body {
   right: 0;
   z-index: 1000;
   min-width: 220px;
-  background: white;
+  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 10px;
   box-shadow: var(--shadow-lg);
@@ -249,7 +298,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 14px;
-  background: white;
+  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 24px;
@@ -280,7 +329,7 @@ body {
 
 .type-card-disabled .type-card-icon {
   background: var(--bg);
-  color: #9aa4b2;
+  color: var(--text-muted);
 }
 
 /* AdminMenu's options are a state change, not a navigation, so they're
@@ -294,13 +343,13 @@ button.type-card {
 }
 
 .type-card-disabled {
-  color: #9aa4b2;
+  color: var(--text-muted);
   cursor: not-allowed;
 }
 
 .type-card-disabled:hover {
   border-color: var(--border);
-  background: white;
+  background: var(--surface);
 }
 
 .type-card-badge {
@@ -393,7 +442,7 @@ button.type-card {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  background: white;
+  background: var(--surface);
   border: 1px solid var(--border);
   border-left: 4px solid var(--border);
   border-radius: 10px;
@@ -452,7 +501,7 @@ button.type-card {
   list-style: none;
   padding: 0;
   margin: 12px 0 0;
-  background: white;
+  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   overflow: hidden;
@@ -496,6 +545,24 @@ button.type-card {
   white-space: nowrap;
 }
 
+.activity-main,
+.activity-meta {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.activity-meta {
+  margin-top: 2px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.activity-type {
+  font-weight: 600;
+  color: var(--accent);
+}
+
 .activity-action {
   flex-shrink: 0;
   font-size: 11px;
@@ -523,22 +590,76 @@ button.type-card {
   text-align: right;
 }
 
-.login-page {
-  max-width: 360px;
-  margin: 80px auto 0;
+.login-screen {
+  min-height: calc(100vh - 64px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
 }
 
-.login-form {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  margin-top: 16px;
+.login-card {
+  width: 100%;
+  max-width: 380px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: var(--shadow-lg);
+  padding: 40px 32px;
 }
 
-.login-form label {
+.login-mark {
+  display: block;
+  width: 64px;
+  height: 64px;
+  margin: 0 auto 20px;
+  border-radius: 16px;
+}
+
+.login-title {
+  text-align: center;
+  margin: 0 0 4px;
+}
+
+.login-subtitle {
+  text-align: center;
+  margin: 0 0 28px;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.login-field {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
+  margin-bottom: 18px;
+}
+
+.login-field span {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.login-field input {
+  width: 100%;
+}
+
+.login-pin-input {
+  letter-spacing: 12px;
+  font-size: 22px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.login-card .error {
+  margin: 0 0 16px;
+}
+
+.login-submit {
+  width: 100%;
+  margin-top: 8px;
+  font-size: 15px;
 }
 
 .page {
@@ -572,7 +693,7 @@ h2 {
 }
 
 .form-card {
-  background: white;
+  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 20px 24px;
@@ -936,7 +1057,7 @@ h2 {
 
 .attention-item {
   position: relative;
-  background: white;
+  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 12px 34px 12px 14px;
@@ -1040,7 +1161,7 @@ h2 {
   padding: 8px 14px;
   border-radius: 8px;
   border: 1px solid var(--border);
-  background: white;
+  background: var(--surface);
   color: var(--text);
   font-size: 13px;
   font-weight: 600;
@@ -1127,7 +1248,7 @@ h2 {
   width: 40px;
   height: 40px;
   border-radius: 999px;
-  background: white;
+  background: var(--surface);
   border: 1px solid var(--border);
   color: var(--text);
   box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
@@ -1156,7 +1277,7 @@ h2 {
 }
 
 .breadcrumb-sep {
-  color: #b7bec9;
+  color: var(--border-strong);
   flex-shrink: 0;
 }
 
@@ -1214,6 +1335,11 @@ h2 {
   color: var(--conditional);
 }
 
+.scope-badge-warn {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
 /* Operation picker cards (OperationsList.jsx) -- an enlarged, icon-bearing
    variant of .type-card, since these are the primary tappable targets on
    this screen and were reading as visually flat/basic next to the rest of
@@ -1229,7 +1355,7 @@ h2 {
   display: flex;
   align-items: center;
   gap: 16px;
-  background: white;
+  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 14px;
   padding: 22px 24px;
@@ -1283,13 +1409,21 @@ h2 {
 }
 
 .muted {
-  color: #6b7280;
+  color: var(--text-muted);
   font-size: 14px;
 }
 
 .error {
   background: var(--fail-bg);
   color: var(--fail);
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 14px;
+}
+
+.success-note {
+  background: var(--ok-bg);
+  color: var(--ok);
   padding: 8px 12px;
   border-radius: 6px;
   font-size: 14px;
@@ -1323,7 +1457,7 @@ textarea {
   border: 2px solid var(--border);
   border-radius: 6px;
   font-size: 15px;
-  background: white;
+  background: var(--surface);
   color: var(--text);
   min-height: 42px;
   transition: border-color 0.12s ease, box-shadow 0.12s ease;
@@ -1345,7 +1479,7 @@ input:disabled,
 select:disabled,
 textarea:disabled {
   background: var(--bg);
-  color: #7c8594;
+  color: var(--text-muted);
   cursor: not-allowed;
 }
 
@@ -1374,7 +1508,7 @@ input[type="number"] {
   display: flex;
   align-items: center;
   gap: 10px;
-  background: white;
+  background: var(--surface);
   border: 2px solid var(--border);
   border-radius: 8px;
   padding: 0 14px;
@@ -1385,7 +1519,7 @@ input[type="number"] {
 
 .search-bar svg {
   flex-shrink: 0;
-  color: #8792a2;
+  color: var(--text-muted);
 }
 
 .search-bar:focus-within {
@@ -1439,8 +1573,8 @@ button:active {
 }
 
 button:disabled {
-  background: #d5d9e0;
-  color: #8a92a0;
+  background: var(--border-strong);
+  color: var(--text-muted);
   cursor: not-allowed;
 }
 
@@ -1451,8 +1585,8 @@ a:focus-visible {
 }
 
 button.secondary-btn {
-  background: white;
-  color: var(--primary);
+  background: var(--surface);
+  color: var(--text);
   border: 2px solid var(--border);
   box-shadow: none;
 }
@@ -1469,7 +1603,7 @@ button.secondary-btn:hover {
   list-style: none;
   margin: 0;
   padding: 4px 0;
-  background: white;
+  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 6px;
   box-shadow: var(--shadow-lg);
@@ -1501,7 +1635,7 @@ button.secondary-btn:hover {
 }
 
 .confirm-box {
-  background: white;
+  background: var(--surface);
   border-radius: var(--radius);
   box-shadow: var(--shadow-lg);
   padding: 24px;
@@ -1511,6 +1645,12 @@ button.secondary-btn:hover {
 
 .confirm-box p {
   margin: 0 0 20px;
+}
+
+.confirm-box input {
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 20px;
 }
 
 .confirm-actions {
@@ -1536,16 +1676,23 @@ button.secondary-btn:hover {
   box-shadow: none;
 }
 
+/* Fixed (not var(--ok)/etc.) on purpose -- these carry white text directly
+   on a solid fill, unlike the token-based badges elsewhere that put a
+   status color as TEXT on a tinted background. --ok/--fail/--conditional
+   are deliberately brighter in dark mode for that badge-text role, which
+   would leave white-on-them here badly low-contrast; a solid approve/
+   reject/conditional button reading the same in both themes is normal
+   anyway (think "Delete is always red"). */
 button.approve {
-  background: var(--ok);
+  background: #1a7f4b;
 }
 
 button.conditional {
-  background: var(--conditional);
+  background: #1d5fa8;
 }
 
 button.reject {
-  background: var(--fail);
+  background: #b3261e;
 }
 
 .card-list {
@@ -1557,7 +1704,7 @@ button.reject {
 }
 
 .card {
-  background: white;
+  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 14px 16px;
@@ -1575,7 +1722,7 @@ button.reject {
 .part-lookup-layout {
   display: flex;
   align-items: stretch;
-  background: white;
+  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 10px;
   box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
@@ -1705,7 +1852,7 @@ button.reject {
 
 .card a {
   text-decoration: none;
-  color: #1a1a1a;
+  color: var(--text);
 }
 
 .actions-row {
@@ -1757,11 +1904,75 @@ button.reject {
 
 .status-inactive {
   background: var(--bg);
-  color: #6b7280;
+  color: var(--text-muted);
 }
 
-.trash-card,
-.admin-user-row {
+/* WorkOrderLookup.jsx -- a soft heads-up (not a blocking .error), e.g. when
+   one WO# search turns up more than one part, which is unusual but not
+   necessarily wrong. */
+.warning-note {
+  background: var(--warn-bg);
+  color: var(--warn);
+  padding: 10px 14px;
+  border-radius: 6px;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+/* WorkOrderLookup.jsx -- one card per part, a fixed-order checklist row per
+   inspection type (Incoming/Set-up/In-Process/Final) so a missing type is as
+   visible as a present one, instead of just absent from a flat list. */
+.wo-part-group {
+  margin-bottom: 12px;
+}
+
+.wo-part-group h3 {
+  margin: 0 0 10px;
+  font-size: 15px;
+}
+
+.wo-type-checklist {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.wo-type-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+
+.wo-type-row:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+
+.wo-type-label {
+  flex: 0 0 100px;
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--text);
+  padding-top: 3px;
+}
+
+.wo-type-items {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+  font-size: 13.5px;
+}
+
+.trash-card {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1772,6 +1983,7 @@ button.reject {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  padding: 10px 4px;
 }
 
 .admin-user-clients-grid {
@@ -1787,20 +1999,199 @@ button.reject {
   gap: 12px;
 }
 
-.admin-user-group {
-  margin-bottom: 24px;
+.admin-users-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 8px 0 16px;
 }
 
-.admin-user-group-heading {
+.admin-users-header h1 {
+  margin: 0;
+}
+
+.admin-create-user-panel {
+  padding: 16px;
+  align-items: center;
+}
+
+.admin-users-table td {
+  vertical-align: middle;
+}
+
+.admin-user-you-badge {
+  margin-left: 8px;
+  padding: 2px 8px;
+  font-size: 10.5px;
+  vertical-align: middle;
+}
+
+.role-badge {
+  display: inline-block;
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.role-badge-admin {
+  background: var(--accent-tint);
+  color: var(--accent-bright);
+}
+
+.role-badge-engineer {
+  background: var(--conditional-bg);
+  color: var(--conditional);
+}
+
+.role-badge-qc {
+  background: var(--ok-bg);
+  color: var(--ok);
+}
+
+.role-badge-operator {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+.role-badge-supervisor {
+  background: var(--fail-bg);
+  color: var(--fail);
+}
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  min-height: auto;
+  padding: 0;
+  border-radius: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  box-shadow: none;
+}
+
+.icon-btn:hover {
+  background: var(--accent-tint);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.icon-btn-danger:hover {
+  background: var(--fail-bg);
+  border-color: var(--fail);
+  color: var(--fail);
+}
+
+/* Final Inspection photo attachments (InspectionCapture.jsx). */
+.photo-upload-btn {
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+}
+
+.photo-upload-btn-disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.photo-gallery {
+  list-style: none;
+  padding: 0;
+  margin: 12px 0 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 12px;
+}
+
+.photo-gallery-item {
+  position: relative;
+  aspect-ratio: 1;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.photo-gallery-item img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.photo-gallery-delete {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 26px;
+  height: 26px;
+  background: var(--surface);
   font-size: 16px;
-  margin: 20px 0 8px;
+  line-height: 1;
+  box-shadow: var(--shadow-lg);
+}
+
+/* Incoming Inspection cert PDF attachments (InspectionCapture.jsx). */
+.cert-list {
+  list-style: none;
+  padding: 0;
+  margin: 12px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cert-list-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.cert-badge {
+  flex-shrink: 0;
+  padding: 3px 6px;
+  border-radius: 4px;
+  background: var(--accent-tint);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.cert-list-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.cert-list-body a {
+  overflow-wrap: anywhere;
+  font-weight: 500;
+}
+
+.cert-list-body .muted {
+  font-size: 12px;
 }
 
 .datasheet-file {
   display: flex;
   align-items: center;
   gap: 14px;
-  background: white;
+  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 16px 20px;
@@ -1823,7 +2214,7 @@ button.reject {
 .datasheet-file-label {
   font-size: 17px;
   font-weight: 700;
-  color: #1a1a1a;
+  color: var(--text);
 }
 
 /* The "go edit this Data Sheet Template" action (TemplateEditLink.jsx) --
@@ -1838,7 +2229,7 @@ button.reject {
   padding: 9px 16px;
   border-radius: 999px;
   border: 1px solid var(--border);
-  background: white;
+  background: var(--surface);
   color: var(--accent-bright);
   font-size: 13.5px;
   font-weight: 600;
@@ -1852,22 +2243,23 @@ button.reject {
   transform: translateY(-1px);
 }
 
-.drawing-preview {
-  max-width: 100%;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  margin: 12px 0;
+/* The Data Sheet Template page (DataSheetTemplate.jsx) is split into a
+   "Drawing" card and a "Find# Columns" card instead of one long flowing
+   section -- .template-section just adds breathing room between them, the
+   look itself comes from the existing .card rule. */
+.template-section {
+  padding: 20px;
+  margin-bottom: 20px;
 }
 
-.drawing-preview-pdf {
-  width: 100%;
-  height: 600px;
+.template-section h2 {
+  margin-top: 0;
 }
 
 table {
   width: 100%;
   border-collapse: collapse;
-  background: white;
+  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   overflow: hidden;
@@ -1915,10 +2307,44 @@ th {
   min-width: 180px;
 }
 
+.capture-table-transposed {
+  /* Override the global table{width:100%}. Neither width:auto nor
+     width:fit-content actually shrinks a display:table box -- the table
+     auto-layout algorithm still stretches it to fill a wide containing
+     block, dumping all the leftover space into whichever column is most
+     flexible (with few Find# columns, that's the single data column,
+     shoving its input way off to the right). display:inline-table sidesteps
+     that: inline-level boxes always size to their content, so the table
+     hugs its columns' natural width regardless of the table layout
+     algorithm's own width resolution. .table-scroll still handles overflow
+     for many columns. */
+  display: inline-table;
+  /* The global table{width:100%} above is a real percentage width, and
+     inline-table (unlike display:table) still honors it -- so it has to be
+     cancelled explicitly here, or the table stretches to fill .table-scroll
+     and auto table-layout dumps the leftover space into a column, same as
+     the width:100% problem this rule exists to avoid in the first place. */
+  width: auto;
+  /* position:sticky on the first column (below) + the base table's
+     border-collapse:collapse is a known bad combination -- browsers
+     reserve extra phantom space next to the sticky column instead of
+     collapsing its border against the next cell, showing up as a big
+     empty gap right after the Find# label column. border-spacing:0 on
+     separate borders avoids the quirk; since th/td here only ever set
+     border-bottom (no vertical borders), this doesn't change how the
+     grid lines look. */
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
 .capture-table-transposed th,
 .capture-table-transposed td {
   text-align: center;
   min-width: 100px;
+  /* Tighter than the base th/td 12px -- this grid is dense data entry
+     (Find# header + spec rows + one row per sample), so generous padding
+     reads as wasted vertical space between rows. */
+  padding: 6px 12px;
 }
 
 .capture-table-transposed th:first-child,
@@ -1932,7 +2358,7 @@ th {
   position: sticky;
   left: 0;
   z-index: 2;
-  background: white;
+  background: var(--surface);
 }
 
 .capture-table-transposed thead th:first-child {
@@ -1945,11 +2371,11 @@ th {
 }
 
 .sample-row-alt td {
-  background: #fafbfc;
+  background: var(--surface-alt);
 }
 
 .sample-row-alt td:first-child {
-  background: #f3f5f7;
+  background: var(--table-header-bg);
 }
 
 .sample-row:hover td {
@@ -1968,11 +2394,24 @@ th {
      it so the input itself never overflows past that width. */
   width: 84px;
   min-width: 84px;
-  min-height: 40px;
+  min-height: 32px;
   box-sizing: border-box;
-  padding: 8px 4px;
+  padding: 6px 4px;
 }
 
+/* machine_log_mode's per-row fields (InspectionCapture.jsx) -- Qty and
+   Machine # are short, so the shared 84px default above is plenty; Comment
+   needs real room for a sentence like the paper form's free-text notes. */
+.sample-row-qty-input {
+  width: 64px !important;
+  min-width: 64px !important;
+}
+
+.sample-row-comment-input {
+  width: 220px !important;
+  min-width: 220px !important;
+  text-align: left;
+}
 
 .check-column-cell {
   text-align: center;
@@ -2014,7 +2453,7 @@ th {
   min-height: 32px;
   border-radius: 6px;
   border: 1.5px solid var(--border);
-  background: white;
+  background: var(--surface);
   color: var(--text-muted);
   font-size: 12px;
   font-weight: 700;
@@ -2109,7 +2548,7 @@ th {
 
 .sign-panel {
   background: var(--warn-bg);
-  border: 1px solid #d9b23c;
+  border: 1px solid var(--warn);
   border-left: 4px solid var(--warn);
   border-radius: 8px;
   padding: 14px 16px;
@@ -2138,7 +2577,32 @@ th {
   max-width: 1200px;
 }
 
+/* The printable Data Sheet replica -- re-pins every token its descendants
+   reference back to its light value, regardless of the app's own theme (see
+   the "Dark theme" comment on :root above). A printed/exported quality
+   record should always read the same on paper, so it never goes dark. */
 .sheet {
+  --bg: #f5f6f8;
+  --surface: #ffffff;
+  --surface-alt: #fafbfc;
+  --table-header-bg: #eef0f3;
+  --ok: #1a7f4b;
+  --ok-bg: #e6f4ec;
+  --fail: #b3261e;
+  --fail-bg: #fbeceb;
+  --warn: #8a5b00;
+  --warn-bg: #fdf3dd;
+  --conditional: #1d5fa8;
+  --conditional-bg: #e7f0fa;
+  --border: #e2e5eb;
+  --border-strong: #cbd0d9;
+  --text: #1c2029;
+  --text-muted: #6b7280;
+  --accent: #2f6690;
+  --accent-bright: #24506f;
+  --accent-tint: #e8f0f6;
+  color-scheme: light;
+
   background: white;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -2449,10 +2913,12 @@ th {
     display: none;
   }
 
-  .login-page {
-    max-width: 100%;
-    margin: 24px auto 0;
-    padding: 0 16px;
+  .login-screen {
+    padding: 16px;
+  }
+
+  .login-card {
+    padding: 32px 22px;
   }
 
   h1 {
@@ -2582,7 +3048,7 @@ th {
   color: var(--accent);
   font-weight: 600;
   font-size: 13px;
-  background: white;
+  background: var(--surface);
   border-left: 2px dashed var(--accent);
 }
 
@@ -2677,7 +3143,7 @@ th {
   padding: 2px 8px;
   border-radius: 4px;
   border: 1px solid var(--border);
-  color: #888;
+  color: var(--text-muted);
 }
 
 .type-chip-active {

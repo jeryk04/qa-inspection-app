@@ -1,12 +1,17 @@
-// Usage: node src/scripts/createUser.js <username> <password> <full name>
+// Usage: node src/scripts/createUser.js <username> <pin> <full name>
 const bcrypt = require("bcryptjs");
 const db = require("../db");
+const { PIN_LENGTH, isValidPin } = require("../lib/pin");
 
 const [username, password, ...nameParts] = process.argv.slice(2);
 const fullName = nameParts.join(" ");
 
 if (!username || !password || !fullName) {
-  console.error("Usage: node src/scripts/createUser.js <username> <password> <full name>");
+  console.error("Usage: node src/scripts/createUser.js <username> <pin> <full name>");
+  process.exit(1);
+}
+if (!isValidPin(password)) {
+  console.error(`PIN must be exactly ${PIN_LENGTH} digits.`);
   process.exit(1);
 }
 

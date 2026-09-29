@@ -1,13 +1,60 @@
 const express = require("express");
+const multer = require("multer");
+const path = require("path");
 const db = require("../db");
 const { generateInspectionPdf } = require("../pdf/inspectionSheet");
-const { recordAudit, recordHeaderAudit, recordMeasurementsAudit, recordPointSummariesAudit } = require("../lib/audit");
+const {
+  recordAudit,
+  recordHeaderAudit,
+  recordMeasurementsAudit,
+  recordPointSummariesAudit,
+  recordSampleRowsAudit,
+} = require("../lib/audit");
 const { signInspectionStatus } = require("../lib/inspectionSigning");
 const { parsePassFailState } = require("../lib/passfail");
 const attachRole = require("../middleware/attachRole");
 const requireRole = require("../middleware/requireRole");
+const { isAssignedToClient } = require("../lib/operatorAccess");
 
 const router = express.Router();
+
+// Supporting photos (POST /:id/photos below) -- same disk-storage pattern as
+// drawings.js's upload, kept local here rather than shared since the two
+// serve different purposes (a drawing image vs. an optional inspection
+// attachment) and the config is a few lines either way.
+const photoStorage = multer.diskStorage({
+  destination: path.join(__dirname, "..", "..", "uploads"),
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname);
+    cb(null, `photo-${Date.now()}${ext}`);
+  },
+});
+const uploadPhoto = multer({
+  storage: photoStorage,
+  fileFilter: (req, file, cb) => {
+    if (!file.mimetype.startsWith("image/")) {
+      return cb(new Error("Only image files can be attached as inspection photos."));
+    }
+    cb(null, true);
+  },
+});
+
+// Supplier certs (POST /:id/certs below) -- PDFs only, same disk storage.
+const certStorage = multer.diskStorage({
+  destination: path.join(__dirname, "..", "..", "uploads"),
+  filename: (req, file, cb) => {
+    cb(null, `cert-${Date.now()}.pdf`);
+  },
+});
+const uploadCert = multer({
+  storage: certStorage,
+  limits: { fileSize: 25 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const isPdf = file.mimetype === "application/pdf" || path.extname(file.originalname).toLowerCase() === ".pdf";
+    if (!isPdf) return cb(new Error("Only PDF files can be attached as certs."));
+    cb(null, true);
+  },
+});
 
 // Operators only ever do In-Process (see CLAUDE.md) -- everyone else
 // (qc/admin/engineer) is unrestricted by type here. Used on create and on
@@ -18,21 +65,15 @@ function canAccessType(role, type) {
   return true;
 }
 
-// Operators' In-Process work only ever covers these customers (confirmed by
-// QC) -- checked on create only, not on edits to already-existing Data
-// Sheets, so this doesn't retroactively lock anyone out of in-progress work
-// that predates the restriction.
-const OPERATOR_ALLOWED_CLIENTS = new Set([
-  "Gas Tubes",
-  "Insulet Corp",
-  "PMI",
-  "Shaw Development",
-  "Environment One",
-  "Kawasaki",
-  "Bravo",
-  "Game Scout",
-  "Noveske Rifleworks LLC",
-]);
+// Operators' In-Process work only ever covers customers an admin has
+// assigned them to via user_clients (see lib/operatorAccess.js and Admin >
+// Users' "Assigned customers") -- checked on create and on every subsequent
+// view/edit of that inspection below, not just create, so un-assigning a
+// customer takes effect immediately rather than only blocking new work.
+// (This replaced a hardcoded, admin-account-shared customer name list that
+// had to be hand-edited and kept in sync with a duplicate copy in
+// Clients.jsx -- that's exactly the kind of drift that once silently
+// blocked "Environment One Corp" until someone noticed.)
 
 const HEADER_FIELDS = [
   "customer",
@@ -49,13 +90,14 @@ const HEADER_FIELDS = [
   "notes",
   "requires_in_process",
   "hundred_percent_inspection",
+  "machine_log_mode",
 ];
 
 // Booleans stored as 0/1 INTEGER columns -- special-cased on every read of
 // req.body for these fields (POST's columns mapping and PUT's normalize
 // step below) since better-sqlite3 can't bind a raw JS boolean, and a plain
 // `?? null` would violate their NOT NULL constraint when omitted on create.
-const BOOLEAN_HEADER_FIELDS = ["requires_in_process", "hundred_percent_inspection"];
+const BOOLEAN_HEADER_FIELDS = ["requires_in_process", "hundred_percent_inspection", "machine_log_mode"];
 
 // Final Inspection's "Operator In-Process Data Sheet required" gate (see PUT
 // /:id/status): satisfied by any in_process inspection on the same part that
@@ -104,11 +146,17 @@ function computeWithinTolerance(point, measuredValue) {
 router.get("/", (req, res) => {
   const { part_id, type, client_id, status, date_from, date_to, operation_id, job_number } = req.query;
 
+  // created_by_name: who actually created this Data Sheet record (a real FK
+  // to the logged-in account, not the free-text "inspector" header field
+  // anyone can type/leave blank) -- LEFT JOIN since created_by is nullable
+  // (older rows, or ones created some other way) and shouldn't drop the
+  // inspection from the list just because that link is missing.
   let query = `
-    SELECT i.*, p.part_number, p.client_id, c.name AS client_name
+    SELECT i.*, p.part_number, p.client_id, c.name AS client_name, u.full_name AS created_by_name
     FROM inspections i
     JOIN parts p ON p.id = i.part_id
     JOIN clients c ON c.id = p.client_id
+    LEFT JOIN users u ON u.id = i.created_by
     WHERE 1 = 1
   `;
   const params = [];
@@ -167,7 +215,7 @@ router.get("/", (req, res) => {
 // not a free-text comparison against the inspector field) --
 // deliberately scoped per-operator for now (an operator only sees their own work),
 // can be loosened to company-wide visibility later if needed.
-router.get("/status-lookup", attachRole, requireRole("operator", "qc", "admin"), (req, res) => {
+router.get("/status-lookup", attachRole, requireRole("operator", "qc", "admin", "supervisor"), (req, res) => {
   const { part_number, job_number } = req.query;
   if (!part_number) return res.status(400).json({ error: "part_number is required" });
 
@@ -229,15 +277,21 @@ router.get("/dashboard-stats", (req, res) => {
 
   // Signature events (not audit_log generally) -- these are the meaningful
   // "outcome" moments an inspector cares about at a glance, each with an
-  // exact signed_at timestamp already.
+  // exact signed_at timestamp already. operation_scope tells Operator vs QC
+  // apart for In-Process (both share inspections.type = 'in_process');
+  // creator_role is the fallback for everything without an operation.
   const recentActivity = db
     .prepare(
       `SELECT s.action, s.signed_at AS at, i.id AS inspection_id, i.type, i.job_number,
-              p.part_number, c.name AS client_name
+              p.part_number, c.name AS client_name,
+              o.name AS operation_name, o.scope AS operation_scope,
+              u.role AS creator_role
        FROM signatures s
        JOIN inspections i ON i.id = s.inspection_id
        JOIN parts p ON p.id = i.part_id
        JOIN clients c ON c.id = p.client_id
+       LEFT JOIN operations o ON o.id = i.operation_id
+       LEFT JOIN users u ON u.id = i.created_by
        WHERE 1 = 1 ${where}
        ORDER BY s.signed_at DESC
        LIMIT 6`
@@ -251,7 +305,7 @@ router.get("/dashboard-stats", (req, res) => {
 // Company-wide only (no mine=1 scoping like dashboard-stats above) since
 // trend/tolerance analysis across parts doesn't make sense scoped to one
 // operator's own work.
-router.get("/analytics", attachRole, requireRole("qc", "admin", "engineer"), (req, res) => {
+router.get("/analytics", attachRole, requireRole("qc", "admin", "engineer", "supervisor"), (req, res) => {
   // Zero-filled so the trend line has a real point for every day in the
   // window, not just the days something happened to be dated to.
   const volumeRows = db
@@ -404,7 +458,7 @@ router.get("/analytics", attachRole, requireRole("qc", "admin", "engineer"), (re
 // dismissed_alerts in schema.sql for why this is keyed by measurement_id,
 // not balloon_point_id: a newer measurement on the same point naturally
 // supersedes the dismissal instead of needing it cleared by hand).
-router.post("/analytics/dismiss-alert", attachRole, requireRole("qc", "admin", "engineer"), (req, res) => {
+router.post("/analytics/dismiss-alert", attachRole, requireRole("qc", "admin", "engineer", "supervisor"), (req, res) => {
   const { measurement_id } = req.body;
   if (!measurement_id) return res.status(400).json({ error: "measurement_id is required" });
   if (!db.prepare("SELECT 1 FROM measurements WHERE id = ?").get(measurement_id)) {
@@ -421,10 +475,11 @@ function getInspectionDetail(id) {
   const inspection = db
     .prepare(
       `SELECT i.*, p.part_number, p.description AS part_description, p.client_id,
-              c.name AS client_name
+              c.name AS client_name, o.scope AS operation_scope
        FROM inspections i
        JOIN parts p ON p.id = i.part_id
        JOIN clients c ON c.id = p.client_id
+       LEFT JOIN operations o ON o.id = i.operation_id
        WHERE i.id = ?`
     )
     .get(id);
@@ -432,7 +487,8 @@ function getInspectionDetail(id) {
 
   const measurements = db
     .prepare(
-      `SELECT m.*, bp.balloon_number, bp.max_spec, bp.min_spec, bp.mean_value, bp.sort_order, bp.decimal_places
+      `SELECT m.*, bp.balloon_number, bp.max_spec, bp.min_spec, bp.mean_value, bp.sort_order, bp.decimal_places,
+              bp.is_reference, bp.is_check_column
        FROM measurements m
        JOIN balloon_points bp ON bp.id = m.balloon_point_id
        WHERE m.inspection_id = ?
@@ -454,13 +510,20 @@ function getInspectionDetail(id) {
     )
     .all(id);
 
+  // machine_log_mode's per-row qty/machine/comment (see schema.sql) --
+  // harmless to fetch even when the inspection isn't in that mode; it'll
+  // just always be empty.
+  const sampleRows = db
+    .prepare("SELECT * FROM inspection_sample_rows WHERE inspection_id = ? ORDER BY sample_number")
+    .all(id);
+
   // All Find# columns defined on the drawing — independent of whether they
   // have a recorded measurement yet, so the sheet/PDF grid shows every
   // column from the start instead of only ones that already have data.
   const points = inspection.drawing_id
     ? db
         .prepare(
-          `SELECT id, balloon_number, max_spec, min_spec, mean_value, decimal_places
+          `SELECT id, balloon_number, max_spec, min_spec, mean_value, decimal_places, is_reference, is_check_column
            FROM balloon_points WHERE drawing_id = ? ORDER BY sort_order`
         )
         .all(inspection.drawing_id)
@@ -496,13 +559,24 @@ function getInspectionDetail(id) {
     if (linked) linkedInProcess = getInspectionDetail(linked.id);
   }
 
-  return { ...inspection, measurements, pointSummaries, points, signature: signature || null, linkedInProcess };
+  return {
+    ...inspection,
+    measurements,
+    pointSummaries,
+    sampleRows,
+    points,
+    signature: signature || null,
+    linkedInProcess,
+  };
 }
 
 // GET /api/inspections/:id  (includes measurements + specs for each balloon)
-router.get("/:id", (req, res) => {
+router.get("/:id", attachRole, (req, res) => {
   const inspection = getInspectionDetail(req.params.id);
   if (!inspection) return res.status(404).json({ error: "Inspection not found" });
+  if (req.user.role === "operator" && !isAssignedToClient(req.user.id, inspection.client_id)) {
+    return res.status(403).json({ error: "You're not assigned to this customer." });
+  }
   res.json(inspection);
 });
 
@@ -550,13 +624,16 @@ router.post("/", attachRole, (req, res) => {
     // pattern as POST /api/drawings).
     const operation = db.prepare("SELECT part_id, scope FROM operations WHERE id = ?").get(operation_id);
     if (!operation) return res.status(404).json({ error: "Operation not found" });
-    // Set-up, the Operator's In-Process list, and QC's own separate
-    // In-Process list are three independent operation lists (see schema.sql's
-    // operations.scope comment) -- the UI only ever offers the matching one,
-    // this is the API-level backstop against an operation_id from the wrong
-    // list being used to create an inspection.
+    // Set-up, the Operator's In-Process list, QC's own separate In-Process
+    // list, and Samples are four independent operation lists (see
+    // schema.sql's operations.scope comment) -- the UI only ever offers the
+    // matching one, this is the API-level backstop against an operation_id
+    // from the wrong list being used to create an inspection.
     if (type === "setup" && operation.scope !== "setup") {
       return res.status(400).json({ error: "This operation isn't in the Set-up list." });
+    }
+    if (type === "samples" && operation.scope !== "samples") {
+      return res.status(400).json({ error: "This operation isn't in the Samples list." });
     }
     if (type === "in_process") {
       if (!["in_process_operator", "in_process_qc"].includes(operation.scope)) {
@@ -588,18 +665,21 @@ router.post("/", attachRole, (req, res) => {
     .prepare(`SELECT p.*, c.name AS client_name FROM parts p JOIN clients c ON c.id = p.client_id WHERE p.id = ?`)
     .get(part_id);
   if (!part) return res.status(404).json({ error: "Part not found" });
-  if (req.user.role === "operator" && !OPERATOR_ALLOWED_CLIENTS.has(part.client_name)) {
-    return res.status(403).json({ error: "Operators can only start In-Process Data Sheets for Gas Tubes, Insulet Corp, PMI, Shaw Development, Environment One, Kawasaki, Bravo, Game Scout, or Noveske Rifleworks LLC." });
+  if (req.user.role === "operator" && !isAssignedToClient(req.user.id, part.client_id)) {
+    return res.status(403).json({
+      error: "You're not assigned to this customer. Ask an admin to assign it to you in Admin > Users.",
+    });
   }
 
-  // hundred_percent_inspection is set once at template setup (see PUT
-  // /api/drawings/:id), not per-inspection -- every new Data Sheet created
-  // against this drawing inherits it, same as it inherits the Find# columns
-  // themselves. Copied onto the inspection row (not read live via a join
-  // later) so an already-created Data Sheet keeps whatever was true when it
-  // was started, even if the template's setting changes afterward.
+  // hundred_percent_inspection (and machine_log_mode below) is set once at
+  // template setup (see PUT /api/drawings/:id), not per-inspection -- every
+  // new Data Sheet created against this drawing inherits it, same as it
+  // inherits the Find# columns themselves. Copied onto the inspection row
+  // (not read live via a join later) so an already-created Data Sheet keeps
+  // whatever was true when it was started, even if the template's setting
+  // changes afterward.
   const drawingDefaults = drawing_id
-    ? db.prepare("SELECT hundred_percent_inspection FROM balloon_drawings WHERE id = ?").get(drawing_id)
+    ? db.prepare("SELECT hundred_percent_inspection, machine_log_mode FROM balloon_drawings WHERE id = ?").get(drawing_id)
     : null;
 
   const columns = ["part_id", "drawing_id", "type", "operation_id", "created_by", "updated_by", ...HEADER_FIELDS];
@@ -621,6 +701,15 @@ router.post("/", attachRole, (req, res) => {
             ? 1
             : 0
           : drawingDefaults?.hundred_percent_inspection
+            ? 1
+            : 0;
+      }
+      if (f === "machine_log_mode") {
+        return req.body.machine_log_mode !== undefined
+          ? req.body.machine_log_mode
+            ? 1
+            : 0
+          : drawingDefaults?.machine_log_mode
             ? 1
             : 0;
       }
@@ -646,10 +735,15 @@ router.post("/", attachRole, (req, res) => {
 // po_number, customer_po_number, operation, job_number, inspector, sampling plan,
 // lot_disposition, notes, date)
 router.put("/:id", attachRole, (req, res) => {
-  const existing = db.prepare("SELECT * FROM inspections WHERE id = ?").get(req.params.id);
+  const existing = db
+    .prepare("SELECT i.*, p.client_id FROM inspections i JOIN parts p ON p.id = i.part_id WHERE i.id = ?")
+    .get(req.params.id);
   if (!existing) return res.status(404).json({ error: "Inspection not found" });
   if (!canAccessType(req.user.role, existing.type)) {
     return res.status(403).json({ error: "Operators can only create or edit In-Process Data Sheets." });
+  }
+  if (req.user.role === "operator" && !isAssignedToClient(req.user.id, existing.client_id)) {
+    return res.status(403).json({ error: "You're not assigned to this customer." });
   }
   if (existing.status !== "in_progress") {
     return res.status(409).json({ error: "This Data Sheet has been signed and can no longer be edited." });
@@ -692,10 +786,15 @@ router.put("/:id", attachRole, (req, res) => {
 // PUT /api/inspections/:id/measurements  (saves/updates measurements in batch)
 // body: { measurements: [{ balloon_point_id, sample_number, measured_value }, ...] }
 router.put("/:id/measurements", attachRole, (req, res) => {
-  const inspection = db.prepare("SELECT status, type FROM inspections WHERE id = ?").get(req.params.id);
+  const inspection = db
+    .prepare("SELECT i.status, i.type, p.client_id FROM inspections i JOIN parts p ON p.id = i.part_id WHERE i.id = ?")
+    .get(req.params.id);
   if (!inspection) return res.status(404).json({ error: "Inspection not found" });
   if (!canAccessType(req.user.role, inspection.type)) {
     return res.status(403).json({ error: "Operators can only create or edit In-Process Data Sheets." });
+  }
+  if (req.user.role === "operator" && !isAssignedToClient(req.user.id, inspection.client_id)) {
+    return res.status(403).json({ error: "You're not assigned to this customer." });
   }
   if (inspection.status !== "in_progress") {
     return res.status(409).json({ error: "This Data Sheet has been signed and can no longer be edited." });
@@ -766,10 +865,15 @@ router.put("/:id/measurements", attachRole, (req, res) => {
 // per Find# instead of one measurements row per sample; see schema.sql)
 // body: { summaries: [{ balloon_point_id, qty_inspected, qty_rejected, reject_notes }, ...] }
 router.put("/:id/point-summaries", attachRole, (req, res) => {
-  const inspection = db.prepare("SELECT status, type FROM inspections WHERE id = ?").get(req.params.id);
+  const inspection = db
+    .prepare("SELECT i.status, i.type, p.client_id FROM inspections i JOIN parts p ON p.id = i.part_id WHERE i.id = ?")
+    .get(req.params.id);
   if (!inspection) return res.status(404).json({ error: "Inspection not found" });
   if (!canAccessType(req.user.role, inspection.type)) {
     return res.status(403).json({ error: "Operators can only create or edit In-Process Data Sheets." });
+  }
+  if (req.user.role === "operator" && !isAssignedToClient(req.user.id, inspection.client_id)) {
+    return res.status(403).json({ error: "You're not assigned to this customer." });
   }
   if (inspection.status !== "in_progress") {
     return res.status(409).json({ error: "This Data Sheet has been signed and can no longer be edited." });
@@ -842,16 +946,97 @@ router.put("/:id/point-summaries", attachRole, (req, res) => {
   res.json(updated);
 });
 
-// DELETE /api/inspections/:id/measurements/:sampleNumber  (removes one sample row)
-router.delete("/:id/measurements/:sampleNumber", attachRole, (req, res) => {
-  const inspection = db.prepare("SELECT status, type FROM inspections WHERE id = ?").get(req.params.id);
+// PUT /api/inspections/:id/sample-rows  (machine_log_mode's per-row qty/
+// machine #/comment -- one row per sample_number, alongside that sample's
+// usual per-point measurements; see schema.sql)
+// body: { sampleRows: [{ sample_number, qty, machine_number, comment }, ...] }
+router.put("/:id/sample-rows", attachRole, (req, res) => {
+  const inspection = db
+    .prepare("SELECT i.status, i.type, p.client_id FROM inspections i JOIN parts p ON p.id = i.part_id WHERE i.id = ?")
+    .get(req.params.id);
   if (!inspection) return res.status(404).json({ error: "Inspection not found" });
   if (!canAccessType(req.user.role, inspection.type)) {
     return res.status(403).json({ error: "Operators can only create or edit In-Process Data Sheets." });
   }
+  if (req.user.role === "operator" && !isAssignedToClient(req.user.id, inspection.client_id)) {
+    return res.status(403).json({ error: "You're not assigned to this customer." });
+  }
   if (inspection.status !== "in_progress") {
     return res.status(409).json({ error: "This Data Sheet has been signed and can no longer be edited." });
   }
+
+  const { sampleRows } = req.body;
+  if (!Array.isArray(sampleRows)) return res.status(400).json({ error: "sampleRows must be an array" });
+
+  const getExistingRow = db.prepare(
+    "SELECT qty, machine_number, comment FROM inspection_sample_rows WHERE inspection_id = ? AND sample_number = ?"
+  );
+
+  const upsert = db.prepare(`
+    INSERT INTO inspection_sample_rows (inspection_id, sample_number, qty, machine_number, comment)
+    VALUES (@inspection_id, @sample_number, @qty, @machine_number, @comment)
+    ON CONFLICT(inspection_id, sample_number)
+    DO UPDATE SET qty = excluded.qty, machine_number = excluded.machine_number, comment = excluded.comment
+  `);
+
+  // Diffed the same way as point-summaries above -- autosave fires this on
+  // every ~900ms debounce, so without a real before/after diff (and the
+  // coalescing recorder), History fills up with a near-duplicate row per
+  // keystroke burst.
+  const changes = [];
+
+  const tx = db.transaction((items) => {
+    for (const item of items) {
+      const sample_number = item.sample_number;
+      const qty = item.qty === "" || item.qty == null ? null : Number(item.qty);
+      const machine_number = item.machine_number || null;
+      const comment = item.comment || null;
+
+      const existing = getExistingRow.get(req.params.id, sample_number);
+      if (!existing || existing.qty !== qty || existing.machine_number !== machine_number || existing.comment !== comment) {
+        changes.push({
+          sample_number,
+          old: existing ?? null,
+          new: { qty, machine_number, comment },
+        });
+      }
+
+      upsert.run({ inspection_id: req.params.id, sample_number, qty, machine_number, comment });
+    }
+  });
+  tx(sampleRows);
+
+  if (changes.length > 0) {
+    recordSampleRowsAudit("inspection", req.params.id, req.user.id, changes);
+  }
+
+  const updated = db
+    .prepare("SELECT * FROM inspection_sample_rows WHERE inspection_id = ? ORDER BY sample_number")
+    .all(req.params.id);
+
+  res.json(updated);
+});
+
+// DELETE /api/inspections/:id/measurements/:sampleNumber  (removes one sample row)
+router.delete("/:id/measurements/:sampleNumber", attachRole, (req, res) => {
+  const inspection = db
+    .prepare("SELECT i.status, i.type, p.client_id FROM inspections i JOIN parts p ON p.id = i.part_id WHERE i.id = ?")
+    .get(req.params.id);
+  if (!inspection) return res.status(404).json({ error: "Inspection not found" });
+  if (!canAccessType(req.user.role, inspection.type)) {
+    return res.status(403).json({ error: "Operators can only create or edit In-Process Data Sheets." });
+  }
+  if (req.user.role === "operator" && !isAssignedToClient(req.user.id, inspection.client_id)) {
+    return res.status(403).json({ error: "You're not assigned to this customer." });
+  }
+  if (inspection.status !== "in_progress") {
+    return res.status(409).json({ error: "This Data Sheet has been signed and can no longer be edited." });
+  }
+
+  db.prepare("DELETE FROM inspection_sample_rows WHERE inspection_id = ? AND sample_number = ?").run(
+    req.params.id,
+    Number(req.params.sampleNumber)
+  );
 
   db.prepare("DELETE FROM measurements WHERE inspection_id = ? AND sample_number = ?").run(
     req.params.id,
@@ -865,13 +1050,200 @@ router.delete("/:id/measurements/:sampleNumber", attachRole, (req, res) => {
   res.status(204).send();
 });
 
+// GET /api/inspections/:id/photos -- optional supporting photos (e.g. a
+// non-conformance or visual reference), surfaced by the frontend on Final
+// Inspection only, but not restricted to that type here (see schema.sql's
+// inspection_photos comment).
+router.get("/:id/photos", (req, res) => {
+  const photos = db
+    .prepare(
+      `SELECT p.*, u.full_name AS uploaded_by_name
+       FROM inspection_photos p
+       LEFT JOIN users u ON u.id = p.uploaded_by
+       WHERE p.inspection_id = ?
+       ORDER BY p.created_at ASC`
+    )
+    .all(req.params.id);
+  res.json(photos);
+});
+
+// POST /api/inspections/:id/photos  (multipart/form-data: image required, caption optional)
+router.post("/:id/photos", attachRole, uploadPhoto.single("image"), (req, res) => {
+  const inspection = db
+    .prepare("SELECT i.status, i.type, p.client_id FROM inspections i JOIN parts p ON p.id = i.part_id WHERE i.id = ?")
+    .get(req.params.id);
+  if (!inspection) return res.status(404).json({ error: "Inspection not found" });
+  if (!canAccessType(req.user.role, inspection.type)) {
+    return res.status(403).json({ error: "Operators can only create or edit In-Process Data Sheets." });
+  }
+  if (req.user.role === "operator" && !isAssignedToClient(req.user.id, inspection.client_id)) {
+    return res.status(403).json({ error: "You're not assigned to this customer." });
+  }
+  if (inspection.status !== "in_progress") {
+    return res.status(409).json({ error: "This Data Sheet has been signed and can no longer be edited." });
+  }
+  if (!req.file) return res.status(400).json({ error: "An image file is required." });
+
+  const { caption } = req.body;
+  const result = db
+    .prepare("INSERT INTO inspection_photos (inspection_id, image_path, caption, uploaded_by) VALUES (?, ?, ?, ?)")
+    .run(req.params.id, `/uploads/${req.file.filename}`, caption?.trim() || null, req.user.id);
+
+  recordAudit("inspection", req.params.id, "photo_uploaded", req.user.id, { photo_id: result.lastInsertRowid });
+
+  const photo = db.prepare("SELECT * FROM inspection_photos WHERE id = ?").get(result.lastInsertRowid);
+  res.status(201).json(photo);
+});
+
+// DELETE /api/inspections/:id/photos/:photoId
+router.delete("/:id/photos/:photoId", attachRole, (req, res) => {
+  const inspection = db
+    .prepare("SELECT i.status, i.type, p.client_id FROM inspections i JOIN parts p ON p.id = i.part_id WHERE i.id = ?")
+    .get(req.params.id);
+  if (!inspection) return res.status(404).json({ error: "Inspection not found" });
+  if (!canAccessType(req.user.role, inspection.type)) {
+    return res.status(403).json({ error: "Operators can only create or edit In-Process Data Sheets." });
+  }
+  if (req.user.role === "operator" && !isAssignedToClient(req.user.id, inspection.client_id)) {
+    return res.status(403).json({ error: "You're not assigned to this customer." });
+  }
+  if (inspection.status !== "in_progress") {
+    return res.status(409).json({ error: "This Data Sheet has been signed and can no longer be edited." });
+  }
+
+  const result = db
+    .prepare("DELETE FROM inspection_photos WHERE id = ? AND inspection_id = ?")
+    .run(req.params.photoId, req.params.id);
+  if (result.changes === 0) return res.status(404).json({ error: "Photo not found" });
+
+  recordAudit("inspection", req.params.id, "photo_deleted", req.user.id, { photo_id: Number(req.params.photoId) });
+  res.status(204).send();
+});
+
+// Shared guard for cert upload/delete: certs only belong on Incoming
+// Inspection, and like photos they freeze once the Data Sheet is signed.
+function checkCertEditable(req, res) {
+  const inspection = db.prepare("SELECT status, type FROM inspections WHERE id = ?").get(req.params.id);
+  if (!inspection) {
+    res.status(404).json({ error: "Inspection not found" });
+    return false;
+  }
+  if (inspection.type !== "incoming") {
+    res.status(400).json({ error: "Certs can only be attached to Incoming Inspection Data Sheets." });
+    return false;
+  }
+  if (!canAccessType(req.user.role, inspection.type)) {
+    res.status(403).json({ error: "Operators can only create or edit In-Process Data Sheets." });
+    return false;
+  }
+  if (inspection.status !== "in_progress") {
+    res.status(409).json({ error: "This Data Sheet has been signed and can no longer be edited." });
+    return false;
+  }
+  return true;
+}
+
+// GET /api/inspections/:id/certs
+router.get("/:id/certs", (req, res) => {
+  const certs = db
+    .prepare(
+      `SELECT c.*, u.full_name AS uploaded_by_name
+       FROM inspection_certs c
+       LEFT JOIN users u ON u.id = c.uploaded_by
+       WHERE c.inspection_id = ?
+       ORDER BY c.created_at ASC, c.id ASC`
+    )
+    .all(req.params.id);
+  res.json(certs);
+});
+
+// POST /api/inspections/:id/certs  (multipart/form-data: file required, PDF only)
+router.post(
+  "/:id/certs",
+  attachRole,
+  (req, res, next) => {
+    if (checkCertEditable(req, res)) next();
+  },
+  (req, res, next) => {
+    uploadCert.single("file")(req, res, (err) => {
+      if (!err) return next();
+      const message =
+        err.code === "LIMIT_FILE_SIZE" ? "Cert PDFs must be 25 MB or smaller." : err.message || "Upload failed.";
+      res.status(400).json({ error: message });
+    });
+  },
+  (req, res) => {
+    if (!req.file) return res.status(400).json({ error: "A PDF file is required." });
+
+    const result = db
+      .prepare("INSERT INTO inspection_certs (inspection_id, file_path, original_name, uploaded_by) VALUES (?, ?, ?, ?)")
+      .run(req.params.id, `/uploads/${req.file.filename}`, req.file.originalname, req.user.id);
+
+    recordAudit("inspection", req.params.id, "cert_uploaded", req.user.id, {
+      cert_id: result.lastInsertRowid,
+      file_name: req.file.originalname,
+    });
+
+    const cert = db
+      .prepare(
+        `SELECT c.*, u.full_name AS uploaded_by_name
+         FROM inspection_certs c LEFT JOIN users u ON u.id = c.uploaded_by
+         WHERE c.id = ?`
+      )
+      .get(result.lastInsertRowid);
+    res.status(201).json(cert);
+  }
+);
+
+// DELETE /api/inspections/:id/certs/:certId
+router.delete("/:id/certs/:certId", attachRole, (req, res) => {
+  if (!checkCertEditable(req, res)) return;
+
+  const cert = db
+    .prepare("SELECT original_name FROM inspection_certs WHERE id = ? AND inspection_id = ?")
+    .get(req.params.certId, req.params.id);
+  if (!cert) return res.status(404).json({ error: "Cert not found" });
+
+  db.prepare("DELETE FROM inspection_certs WHERE id = ?").run(req.params.certId);
+  recordAudit("inspection", req.params.id, "cert_deleted", req.user.id, {
+    cert_id: Number(req.params.certId),
+    file_name: cert.original_name,
+  });
+  res.status(204).send();
+});
+
 // PUT /api/inspections/:id/status  (approve/reject, requires an electronic-signature confirmation)
 // body: { status: 'approved' | 'conditionally_approved' | 'rejected', signer_name: string, reason?: string }
 // 'conditionally_approved' is a UI-facing result only -- signatures.action and
 // inspections.status have no such value (both stay a plain 'approved' CHECK
 // enum), so it's stored as status='approved' plus a required conditional_reason.
-router.put("/:id/status", attachRole, requireRole("qc", "admin"), (req, res) => {
+// Operators can also sign, but only their own In-Process Data Sheets -- ones
+// created under an 'in_process_operator' operation for a customer they're
+// assigned to. QC's In-Process ('in_process_qc'), Set-up, Final, etc. stay
+// QC/admin/supervisor only.
+router.put("/:id/status", attachRole, (req, res) => {
   const { status, signer_name, reason } = req.body;
+  const role = req.user.role;
+  if (role === "operator") {
+    const target = db
+      .prepare(
+        `SELECT i.type, p.client_id, o.scope AS operation_scope
+         FROM inspections i
+         JOIN parts p ON p.id = i.part_id
+         LEFT JOIN operations o ON o.id = i.operation_id
+         WHERE i.id = ?`
+      )
+      .get(req.params.id);
+    if (!target) return res.status(404).json({ error: "Inspection not found" });
+    if (target.type !== "in_process" || target.operation_scope !== "in_process_operator") {
+      return res.status(403).json({ error: "Operators can only sign Operator In-Process Data Sheets." });
+    }
+    if (!isAssignedToClient(req.user.id, target.client_id)) {
+      return res.status(403).json({ error: "You're not assigned to this customer." });
+    }
+  } else if (!["qc", "admin", "supervisor"].includes(role)) {
+    return res.status(403).json({ error: "You don't have permission to sign Data Sheets." });
+  }
   if (!["approved", "conditionally_approved", "rejected"].includes(status)) {
     return res.status(400).json({ error: "status must be 'approved', 'conditionally_approved', or 'rejected'" });
   }
@@ -921,17 +1293,52 @@ router.put("/:id/status", attachRole, requireRole("qc", "admin"), (req, res) => 
   res.json(inspection);
 });
 
+// PUT /api/inspections/:id/unlock  (reopens an already-signed Data Sheet for
+// editing by setting status back to in_progress) -- same admin/supervisor
+// restriction as DELETE /:id below, since this is the non-destructive
+// alternative to it: instead of erasing a signed sheet that turns out to
+// need a correction, reopen it, fix it, and re-sign. Doesn't touch the
+// signatures table -- the old signature row is left exactly as it was (the
+// trg_status_requires_signature/trg_signature_requires_status triggers in
+// schema.sql only constrain moving TO approved/rejected, not back to
+// in_progress), so re-signing afterward just adds a new signature row on
+// top and the full before/after signing history stays visible via the
+// audit log and the signatures table, even though getInspectionDetail's
+// "most recent wins" read only ever surfaces the latest one as *the*
+// signature shown on the report.
+router.put("/:id/unlock", attachRole, requireRole("admin", "supervisor"), (req, res) => {
+  const inspection = db.prepare("SELECT status FROM inspections WHERE id = ?").get(req.params.id);
+  if (!inspection) return res.status(404).json({ error: "Inspection not found" });
+  if (inspection.status === "in_progress") {
+    return res.status(409).json({ error: "This Data Sheet is already open for editing." });
+  }
+
+  db.prepare("UPDATE inspections SET status = 'in_progress', updated_by = ? WHERE id = ?").run(
+    req.user.id,
+    req.params.id
+  );
+  recordAudit("inspection", req.params.id, "unlocked", req.user.id, { previous_status: inspection.status });
+
+  res.json(db.prepare("SELECT * FROM inspections WHERE id = ?").get(req.params.id));
+});
+
 // DELETE /api/inspections/:id  (cascades to its measurements and signatures)
-router.delete("/:id", attachRole, requireRole("qc", "admin"), (req, res) => {
+// Deliberately narrower than every other write route on this file -- QC can
+// create/edit/sign a Data Sheet but not erase an already-saved one. Only
+// admin and supervisor (a role that exists mainly for this) can.
+router.delete("/:id", attachRole, requireRole("admin", "supervisor"), (req, res) => {
   const result = db.prepare("DELETE FROM inspections WHERE id = ?").run(req.params.id);
   if (result.changes === 0) return res.status(404).json({ error: "Inspection not found" });
   res.status(204).send();
 });
 
 // GET /api/inspections/:id/pdf  (renders the Data Sheet as a downloadable PDF)
-router.get("/:id/pdf", (req, res) => {
+router.get("/:id/pdf", attachRole, (req, res) => {
   const inspection = getInspectionDetail(req.params.id);
   if (!inspection) return res.status(404).json({ error: "Inspection not found" });
+  if (req.user.role === "operator" && !isAssignedToClient(req.user.id, inspection.client_id)) {
+    return res.status(403).json({ error: "You're not assigned to this customer." });
+  }
 
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader("Content-Disposition", `inline; filename="inspection-${inspection.id}.pdf"`);

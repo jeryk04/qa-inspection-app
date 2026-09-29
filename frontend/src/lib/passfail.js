@@ -1,13 +1,14 @@
-// A point with a MEAN but no Max/Min is still a real numeric measurement --
-// mean_value there is a reference/nominal value to measure against, not a
-// pass/fail check, so it keeps the regular numeric cell (nothing to flag
+// Whether this column captures as a pass/fail OK/Not-OK check instead of a
+// numeric measurement -- driven by the explicit is_check_column flag, not by
+// whether Max/Mean/Min happen to be set. A check column can still carry a
+// documented reference spec (e.g. a Go/No-Go gauge's nominal size) without
+// switching to numeric capture; conversely a point with a MEAN but no Max/Min
+// is still a real numeric measurement (mean_value there is a reference/
+// nominal value to measure against, not a pass/fail check -- nothing to flag
 // out-of-tolerance against, same as computeWithinTolerance in
 // backend/src/routes/inspections.js, but still a number worth recording).
-// Only a point with NO spec of any kind -- no max, no min, no mean, e.g. a
-// Fixture or Visual check -- has nothing numeric to compare against at all,
-// so it's captured as an OK / Not OK check instead of a measured value.
 export function isSpecless(point) {
-  return point.max_spec == null && point.min_spec == null && point.mean_value == null;
+  return !!point.is_check_column;
 }
 
 const NOT_OK_PREFIX = "NOT OK";

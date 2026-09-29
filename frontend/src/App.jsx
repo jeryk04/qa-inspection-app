@@ -1,9 +1,11 @@
 import { BrowserRouter, Routes, Route, Navigate, Link, useLocation, useNavigate } from "react-router-dom";
 import { AuthProvider, useAuth } from "./context/AuthContext";
+import { ThemeProvider } from "./context/ThemeContext";
 import AccountMenu from "./components/AccountMenu";
 import Home from "./pages/Home";
 import Login from "./pages/Login";
 import ChangePassword from "./pages/ChangePassword";
+import MyAccount from "./pages/MyAccount";
 import Clients from "./pages/Clients";
 import Parts from "./pages/Parts";
 import Inspections from "./pages/Inspections";
@@ -14,6 +16,7 @@ import InspectionCapture from "./pages/InspectionCapture";
 import InspectionSheet from "./pages/InspectionSheet";
 import InspectionHistory from "./pages/InspectionHistory";
 import StatusLookup from "./pages/StatusLookup";
+import WorkOrderLookup from "./pages/WorkOrderLookup";
 import IncomingInspection from "./pages/IncomingInspection";
 import IncomingFolders from "./pages/IncomingFolders";
 import AdminTrash from "./pages/AdminTrash";
@@ -32,7 +35,10 @@ function RequireAuth({ children }) {
     );
   }
   if (!user) {
-    return <Navigate to="/login" state={{ from: location.pathname }} replace />;
+    // Keep the query string too -- ?type=setup/samples/in_process is what
+    // picks the inspection type, so dropping it sent people back to the
+    // wrong type (default in_process) after logging back in.
+    return <Navigate to="/login" state={{ from: location.pathname + location.search }} replace />;
   }
   // Bulk-imported and admin-created accounts start on a temporary password
   // (see db.js's migration / admin.js) -- block every other route until it's
@@ -55,9 +61,9 @@ function RequireAdmin({ children }) {
 function AppShell() {
   // adminView/effectiveRole live in AuthContext (not local state) so every
   // page -- not just this header's nav -- can tell whether an admin is
-  // currently previewing another role. Not persisted: a refresh resets it,
-  // so admin always lands back on AdminMenu.
-  const { user, logout, viewAs: adminView, setViewAs: setAdminView, effectiveRole } = useAuth();
+  // currently previewing another role. Persisted per user (see
+  // AuthContext), so a refresh keeps the current view; logout clears it.
+  const { user, logout, viewAs: adminView, setViewAs: setAdminView } = useAuth();
   const navigate = useNavigate();
 
   // Applies a new preview selection (or null, back to Admin's own view) and
@@ -67,22 +73,18 @@ function AppShell() {
     navigate("/");
   };
 
-  // Customers/History are the QC-oriented company-wide pickers -- Operators
-  // only ever do In-Process (see CLAUDE.md), reached from Operator Home's
-  // own cards instead, so linking there would just dead-end them at flows
-  // (Final Inspection, company-wide history) they can't act on.
-  const isOperatorView = effectiveRole === "operator";
-
   return (
     <>
       <header className="app-header">
         <Link to="/" className="brand">
-          QA Inspection App
+          <img src="/icon-192.png" alt="" width="28" height="28" className="brand-mark" />
+          Inspection App
         </Link>
         {user && (
           <nav className="main-nav">
-            {!isOperatorView && <Link to="/clients">Customers</Link>}
-            {!isOperatorView && <Link to="/history">History</Link>}
+            {/* Customers/History/WO# Lookup moved into AccountMenu's "Browse"
+                section -- see that component for the operator-hiding logic
+                (it reads effectiveRole itself now, not passed down). */}
             <AccountMenu
               user={user}
               viewAs={adminView}
@@ -108,6 +110,14 @@ function AppShell() {
             element={
               <RequireAuth>
                 <Home adminView={adminView} setAdminView={setAdminView} />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/account"
+            element={
+              <RequireAuth>
+                <MyAccount />
               </RequireAuth>
             }
           />
@@ -192,6 +202,14 @@ function AppShell() {
             }
           />
           <Route
+            path="/wo-lookup"
+            element={
+              <RequireAuth>
+                <WorkOrderLookup />
+              </RequireAuth>
+            }
+          />
+          <Route
             path="/incoming"
             element={
               <RequireAuth>
@@ -236,9 +254,11 @@ function AppShell() {
 export default function App() {
   return (
     <BrowserRouter>
-      <AuthProvider>
-        <AppShell />
-      </AuthProvider>
+      <ThemeProvider>
+        <AuthProvider>
+          <AppShell />
+        </AuthProvider>
+      </ThemeProvider>
     </BrowserRouter>
   );
 }

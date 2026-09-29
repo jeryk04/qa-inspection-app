@@ -1,9 +1,22 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { api } from "../api/client";
+import { useAuth } from "../context/AuthContext";
+import { useConfirm } from "../hooks/useConfirm";
+import PageNav from "../components/PageNav";
 import { resultStatus, resultLabel } from "../lib/format";
 
+// Matches backend/src/routes/inspections.js's requireRole("admin",
+// "supervisor") on both DELETE /:id and PUT /:id/unlock, and the same list
+// in Inspections.jsx/OperationDetail.jsx's own guards for the same actions.
+const CAN_MANAGE_ROLES = ["admin", "supervisor"];
+
 export default function InspectionHistory() {
+  const navigate = useNavigate();
+  const { user } = useAuth();
+  const canManage = CAN_MANAGE_ROLES.includes(user?.role);
+  const [contextMenu, setContextMenu] = useState(null); // { inspection, x, y }
+  const [confirm, confirmDialog] = useConfirm();
   const [clients, setClients] = useState([]);
   const [parts, setParts] = useState([]);
   const [inspections, setInspections] = useState([]);
@@ -50,6 +63,49 @@ export default function InspectionHistory() {
 
   useEffect(search, []);
 
+  useEffect(() => {
+    if (!contextMenu) return;
+    const close = () => setContextMenu(null);
+    window.addEventListener("click", close);
+    window.addEventListener("scroll", close, true);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("scroll", close, true);
+    };
+  }, [contextMenu]);
+
+  const handleContextMenu = (e, inspection) => {
+    e.preventDefault();
+    setContextMenu({ inspection, x: e.clientX, y: e.clientY });
+  };
+
+  const handleDelete = async (inspection) => {
+    setContextMenu(null);
+    if (!(await confirm("Are you sure you want to delete this inspection?"))) return;
+    try {
+      await api.deleteInspection(inspection.id);
+      search();
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
+  const handleUnlock = async (inspection) => {
+    setContextMenu(null);
+    if (
+      !(await confirm(
+        "Reopen this signed Data Sheet for editing? It will go back to \"In Progress\" and need to be re-signed once corrected."
+      ))
+    )
+      return;
+    try {
+      await api.unlockInspection(inspection.id);
+      navigate(`/inspections/${inspection.id}`);
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
   const handleSubmit = (e) => {
     e.preventDefault();
     search();
@@ -66,9 +122,7 @@ export default function InspectionHistory() {
 
   return (
     <div className="page">
-      <Link to="/" className="back-link">
-        ← Home
-      </Link>
+      <PageNav backTo="/" backLabel="Back to Home" items={[{ label: "Home", to: "/" }, { label: "Inspection History" }]} />
       <h1>Inspection History</h1>
 
       <form className="filter-form" onSubmit={handleSubmit}>
@@ -115,6 +169,9 @@ export default function InspectionHistory() {
       </form>
 
       {error && <p className="error">{error}</p>}
+      {canManage && !loading && (
+        <p className="muted">Right-click an inspection to delete it, or to reopen a signed one for editing.</p>
+      )}
       {loading ? (
         <p>Loading...</p>
       ) : (
@@ -126,18 +183,20 @@ export default function InspectionHistory() {
               <th>WO#</th>
               <th>Type</th>
               <th>Date</th>
+              <th>By</th>
               <th>Status</th>
               <th></th>
             </tr>
           </thead>
           <tbody>
             {inspections.map((i) => (
-              <tr key={i.id}>
+              <tr key={i.id} onContextMenu={canManage ? (e) => handleContextMenu(e, i) : undefined}>
                 <td>{i.client_name}</td>
                 <td>{i.part_number}</td>
                 <td>{i.job_number || "—"}</td>
                 <td>{i.type}</td>
                 <td>{i.date}</td>
+                <td>{i.created_by_name || "—"}</td>
                 <td>
                   <span className={`status status-${resultStatus(i)}`}>{resultLabel(resultStatus(i))}</span>
                 </td>
@@ -150,7 +209,7 @@ export default function InspectionHistory() {
             ))}
             {inspections.length === 0 && (
               <tr>
-                <td colSpan={7} className="muted">
+                <td colSpan={8} className="muted">
                   No inspections match these filters.
                 </td>
               </tr>
@@ -158,6 +217,18 @@ export default function InspectionHistory() {
           </tbody>
         </table>
       )}
+
+      {contextMenu && (
+        <ul className="context-menu" style={{ top: contextMenu.y, left: contextMenu.x }}>
+          {contextMenu.inspection.status !== "in_progress" && (
+            <li onClick={() => handleUnlock(contextMenu.inspection)}>Unlock for editing</li>
+          )}
+          <li className="context-menu-danger" onClick={() => handleDelete(contextMenu.inspection)}>
+            Delete
+          </li>
+        </ul>
+      )}
+      {confirmDialog}
     </div>
   );
 }

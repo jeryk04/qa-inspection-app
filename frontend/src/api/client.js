@@ -28,6 +28,7 @@ export const api = {
   me: () => request("/auth/me"),
   changePassword: (current_password, new_password) =>
     request("/auth/password", { method: "PUT", body: JSON.stringify({ current_password, new_password }) }),
+  updateEmail: (email) => request("/auth/email", { method: "PUT", body: JSON.stringify({ email }) }),
 
   // Clients
   getClients: () => request("/clients"),
@@ -85,6 +86,11 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ summaries }),
     }),
+  saveSampleRows: (inspectionId, sampleRows) =>
+    request(`/inspections/${inspectionId}/sample-rows`, {
+      method: "PUT",
+      body: JSON.stringify({ sampleRows }),
+    }),
   deleteSample: (inspectionId, sampleNumber) =>
     request(`/inspections/${inspectionId}/measurements/${sampleNumber}`, { method: "DELETE" }),
   setStatus: (inspectionId, status, signerName, reason) =>
@@ -92,7 +98,18 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ status, signer_name: signerName, reason }),
     }),
+  unlockInspection: (inspectionId) => request(`/inspections/${inspectionId}/unlock`, { method: "PUT" }),
   getAuditLog: (inspectionId) => request(`/inspections/${inspectionId}/audit`),
+  getInspectionPhotos: (inspectionId) => request(`/inspections/${inspectionId}/photos`),
+  uploadInspectionPhoto: (inspectionId, formData) =>
+    request(`/inspections/${inspectionId}/photos`, { method: "POST", body: formData }),
+  deleteInspectionPhoto: (inspectionId, photoId) =>
+    request(`/inspections/${inspectionId}/photos/${photoId}`, { method: "DELETE" }),
+  getInspectionCerts: (inspectionId) => request(`/inspections/${inspectionId}/certs`),
+  uploadInspectionCert: (inspectionId, formData) =>
+    request(`/inspections/${inspectionId}/certs`, { method: "POST", body: formData }),
+  deleteInspectionCert: (inspectionId, certId) =>
+    request(`/inspections/${inspectionId}/certs/${certId}`, { method: "DELETE" }),
   getStatusLookup: (params) => {
     const qs = new URLSearchParams(params).toString();
     return request(`/inspections/status-lookup?${qs}`);

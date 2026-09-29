@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api/client";
+import PageNav from "../components/PageNav";
 import { INCOMING_MATERIAL_CLIENT_NAME } from "../lib/incoming";
 
 // The Home.jsx entry point for Incoming Inspection: 3 categories, matching
@@ -20,9 +21,7 @@ export default function IncomingInspection() {
 
   return (
     <div className="page">
-      <Link to="/" className="back-link">
-        ← Home
-      </Link>
+      <PageNav backTo="/" backLabel="Back to Home" items={[{ label: "Home", to: "/" }, { label: "Incoming Inspection" }]} />
       <h1>Incoming Inspection</h1>
       {error && <p className="error">{error}</p>}
       <div className="type-grid">

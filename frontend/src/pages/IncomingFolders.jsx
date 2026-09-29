@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api/client";
+import PageNav from "../components/PageNav";
 import { INCOMING_CATEGORY_CLIENTS, INCOMING_CATEGORY_LABELS } from "../lib/incoming";
 
 // Lists the client "folders" within one Incoming Inspection category
@@ -28,9 +29,15 @@ export default function IncomingFolders() {
 
   return (
     <div className="page">
-      <Link to="/incoming" className="back-link">
-        ← Incoming Inspection
-      </Link>
+      <PageNav
+        backTo="/incoming"
+        backLabel="Back to Incoming Inspection"
+        items={[
+          { label: "Home", to: "/" },
+          { label: "Incoming Inspection", to: "/incoming" },
+          { label: INCOMING_CATEGORY_LABELS[category] ?? category },
+        ]}
+      />
       <h1>{INCOMING_CATEGORY_LABELS[category] ?? category}</h1>
 
       <div className="search-bar">

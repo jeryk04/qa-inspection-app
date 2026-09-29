@@ -1,0 +1,25 @@
+[Unit]
+Description=QA Inspection App - Frontend (production build, served via vite preview)
+After=network.target qa-inspection-backend.service
+Wants=qa-inspection-backend.service
+
+[Service]
+Type=simple
+
+# EDIT before installing -- same caveats as qa-inspection-backend.service:
+#   - User / WorkingDirectory: point at frontend/ on this server.
+#   - ExecStart: absolute path to `npx` on this machine (`which npx`).
+# --strictPort makes the service fail fast (and get restarted by systemd)
+# if port 5173 is already taken, instead of silently drifting to another
+# port that nothing points at.
+User=REPLACE_WITH_SERVICE_USER
+WorkingDirectory=REPLACE_WITH_INSTALL_DIR/frontend
+ExecStart=/usr/bin/npx vite preview --host --port 5173 --strictPort
+
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

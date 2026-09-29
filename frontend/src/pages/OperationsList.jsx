@@ -5,31 +5,36 @@ import { useAuth } from "../context/AuthContext";
 import { useConfirm } from "../hooks/useConfirm";
 import PageNav from "../components/PageNav";
 
-const CAN_CREATE_ROLES = ["qc", "admin", "engineer"];
+const CAN_CREATE_ROLES = ["qc", "admin", "engineer", "supervisor"];
 // Delete is more destructive than rename/create, so it's held to the
 // tighter qc/admin bar used everywhere else (parts, drawings) -- an engineer
-// can still set up and rename operations, just not remove one.
-const CAN_DELETE_ROLES = ["qc", "admin"];
+// can still set up and rename operations, just not remove one. This deletes
+// the operation itself, not an inspection -- unlike inspections.js's DELETE
+// /:id, qc keeps access here.
+const CAN_DELETE_ROLES = ["qc", "admin", "supervisor"];
 
-// Set-up, the Operator's In-Process, and QC's own separate In-Process each
-// have their own fully independent operations + Data Sheet Templates for
-// the same part now (see schema.sql's operations.scope comment); the only
-// thing that has to match between them is the customer/part number, not
-// this list. There's only one ?type=in_process URL (Home.jsx routes both
-// QC's "In-Process Inspection" card and the Operator's "Start in-process
-// inspection" card to it) -- effectiveRole below is what actually tells
-// the two apart, since the URL alone can't.
+// Set-up, the Operator's In-Process, QC's own separate In-Process, and
+// Samples each have their own fully independent operations + Data Sheet
+// Templates for the same part now (see schema.sql's operations.scope
+// comment); the only thing that has to match between them is the
+// customer/part number, not this list. There's only one ?type=in_process
+// URL (Home.jsx routes both QC's "In-Process Inspection" card and the
+// Operator's "Start in-process inspection" card to it) -- effectiveRole
+// below is what actually tells the two apart, since the URL alone can't.
+// Samples doesn't need that split (it's QC-only, like Set-up), so it's a
+// flat type === "samples" check same as Set-up's.
 const SCOPE_LABELS = {
   setup: "Set-up",
   in_process_operator: "In-Process (Operator)",
   in_process_qc: "In-Process (QC)",
+  samples: "Samples",
 };
 
 // Color-codes the scope badge next to the page title -- a quick, consistent
-// visual tell for which of the three independent lists you're looking at,
+// visual tell for which of the four independent lists you're looking at,
 // reusing the app's existing status-tone tokens instead of inventing new
 // colors (see .status-* in App.css).
-const SCOPE_TONES = { setup: "neutral", in_process_operator: "ok", in_process_qc: "conditional" };
+const SCOPE_TONES = { setup: "neutral", in_process_operator: "ok", in_process_qc: "conditional", samples: "warn" };
 
 function OperationIcon() {
   return (
@@ -52,7 +57,14 @@ export default function OperationsList() {
   const [searchParams] = useSearchParams();
   const type = searchParams.get("type") || "in_process";
   const { user, effectiveRole } = useAuth();
-  const scope = type === "setup" ? "setup" : effectiveRole === "operator" ? "in_process_operator" : "in_process_qc";
+  const scope =
+    type === "setup"
+      ? "setup"
+      : type === "samples"
+        ? "samples"
+        : effectiveRole === "operator"
+          ? "in_process_operator"
+          : "in_process_qc";
   const scopeLabel = SCOPE_LABELS[scope];
   const canCreate = CAN_CREATE_ROLES.includes(user?.role);
   const canDelete = CAN_DELETE_ROLES.includes(user?.role);

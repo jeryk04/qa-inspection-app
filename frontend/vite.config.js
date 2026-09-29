@@ -20,9 +20,9 @@ export default defineConfig({
       // meant to be tested straight off the dev server.
       devOptions: { enabled: true, type: 'module' },
       manifest: {
-        name: 'QA Inspection App',
-        short_name: 'QA Inspection',
-        description: 'Digital QA inspection data sheets for Incoming, Set-up, In-Process, and Final Inspection.',
+        name: 'Inspection App',
+        short_name: 'Inspection',
+        description: 'Digital inspection data sheets for Incoming, Set-up, In-Process, and Final Inspection.',
         theme_color: '#1d5c85',
         background_color: '#123a5c',
         display: 'standalone',
@@ -39,6 +39,18 @@ export default defineConfig({
   // the same LAN can reach the dev server -- matches the backend's LAN CORS
   // allowance in backend/src/index.js.
   server: {
+    host: true,
+    // Native fs.watch crashes immediately on this mapped/network drive
+    // (Error: UNKNOWN: unknown error, watch) -- polling avoids relying on
+    // OS-level watch handles.
+    watch: {
+      usePolling: true,
+    },
+  },
+  // `vite preview` serves the production build (see deploy/) -- needs the
+  // same LAN-reachable host: true as the dev server above, since it's what
+  // shop-floor tablets actually hit once deployed, not just localhost.
+  preview: {
     host: true,
   },
 })

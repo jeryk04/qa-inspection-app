@@ -6,6 +6,8 @@ backend/data.db
 backend/data.db-wal
 backend/data.db-shm
 backend/*.bak
+backend/*.bak-*
+backend/backups/
 backend/uploads/*
 !backend/uploads/.gitkeep
 backend/server.log
