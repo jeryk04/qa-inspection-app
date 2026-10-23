@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
-import { api } from "../api/client";
+import { api, downloadInspectionPdf, inspectionPdfName } from "../api/client";
 import { useAuth } from "../context/AuthContext";
 import { formatSpec, toStoredNumber } from "../lib/numeric";
 import { resultLabel, resultStatus, timeAgo } from "../lib/format";
@@ -79,6 +79,7 @@ const ACTION_LABELS = {
   photo_deleted: "Photo removed",
   cert_uploaded: "Cert attached",
   cert_deleted: "Cert removed",
+  tolerance_rechecked: "Spec changed — results re-checked",
   status_changed: "Status changed",
   signed_approved: "Signed — Approved",
   signed_rejected: "Signed — Rejected",
@@ -166,6 +167,7 @@ export default function InspectionCapture() {
   const [signingReason, setSigningReason] = useState("");
   const [signing, setSigning] = useState(false);
   const [unlocking, setUnlocking] = useState(false);
+  const [exportingPdf, setExportingPdf] = useState(false);
   const [sampleMenu, setSampleMenu] = useState(null); // { sampleNumber, x, y }
   const [confirm, confirmDialog] = useConfirm();
   // Optional supporting photos -- Final Inspection only (see the Photos
@@ -665,7 +667,10 @@ export default function InspectionCapture() {
     // #/comment. A row that already carries real data is never auto-removed,
     // no matter how low n is edited down to; the inspector has to delete
     // that one by hand via the row's context menu, same as always.
-    if (field === "sampling_plan_n") {
+    // Not in machine log mode, though: there n= is a piece count (e.g. 655 =
+    // the sum of each row's Qty), while each row is one periodic log entry --
+    // growing to n rows would add hundreds of empty entries.
+    if (field === "sampling_plan_n" && !machineLogMode) {
       const target = Math.floor(Number(value));
       if (Number.isFinite(target) && target > 0) {
         if (samples.length < target) {
@@ -1043,19 +1048,28 @@ export default function InspectionCapture() {
             </svg>
             View / Print
           </Link>
-          <a
-            href={`${BASE_URL}/inspections/${inspectionId}/pdf`}
-            target="_blank"
-            rel="noreferrer"
+          <button
+            type="button"
             className="toolbar-btn"
+            disabled={exportingPdf}
+            onClick={async () => {
+              setExportingPdf(true);
+              try {
+                await downloadInspectionPdf(inspectionId, inspectionPdfName(inspection));
+              } catch (e) {
+                setError(e.message);
+              } finally {
+                setExportingPdf(false);
+              }
+            }}
           >
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
               <path d="M12 3v12" />
               <path d="m7 10 5 5 5-5" />
               <path d="M5 21h14" />
             </svg>
-            Export PDF
-          </a>
+            {exportingPdf ? "Exporting…" : "Export PDF"}
+          </button>
         </div>
       </div>
 

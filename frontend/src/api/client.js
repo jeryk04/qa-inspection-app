@@ -1,3 +1,5 @@
+import { typeLabel, orderRefKind, orderRefValue } from "../lib/format";
+
 // Falls back to whatever host (and scheme) loaded the page, not a hardcoded
 // "http://localhost" -- so this also works when the dev server is opened
 // from another device on the LAN, e.g. a tablet at https://<lan-ip>:5173,
@@ -19,6 +21,39 @@ async function request(path, options = {}) {
   }
   if (res.status === 204) return null;
   return res.json();
+}
+
+// Saves a Data Sheet PDF straight to the user's Downloads. Fetched here (with
+// the session cookie) and handed to the browser as an in-memory blob, rather
+// than linking to the API URL -- with the dev/LAN self-signed certificate,
+// Edge's "Save" re-downloads that URL itself and fails with "Network issue".
+export async function downloadInspectionPdf(inspectionId, filename) {
+  const res = await fetch(`${BASE_URL}/inspections/${inspectionId}/pdf`, { credentials: "include" });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || "Couldn't generate the PDF");
+  }
+  const url = URL.createObjectURL(await res.blob());
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${(filename || `inspection-${inspectionId}`).replace(/[\\/:*?"<>|]+/g, "-").trim()}.pdf`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
+
+// "918-1811-02 Final WO 9777 2026-09-21" (or "... Incoming PO 96664 ...") --
+// what a saved PDF is named. "#" is dropped since it reads oddly in a file name.
+export function inspectionPdfName(inspection) {
+  return [
+    inspection.part_number,
+    typeLabel(inspection.type),
+    orderRefValue(inspection) && `${orderRefKind(inspection).replace("#", "")} ${orderRefValue(inspection)}`,
+    String(inspection.date ?? "").slice(0, 10),
+  ]
+    .filter(Boolean)
+    .join(" ");
 }
 
 export const api = {
@@ -117,6 +152,11 @@ export const api = {
   getDashboardStats: (params = {}) => {
     const qs = new URLSearchParams(params).toString();
     return request(`/inspections/dashboard-stats${qs ? `?${qs}` : ""}`);
+  },
+  getRecentActivity: (params = {}) => {
+    const clean = Object.fromEntries(Object.entries(params).filter(([, v]) => v !== "" && v != null));
+    const qs = new URLSearchParams(clean).toString();
+    return request(`/inspections/recent-activity${qs ? `?${qs}` : ""}`);
   },
   getAnalytics: () => request("/inspections/analytics"),
   dismissAlert: (measurementId) =>

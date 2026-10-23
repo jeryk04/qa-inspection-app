@@ -175,6 +175,35 @@ export default function Clients() {
     }
   };
 
+  // Shared by the full list and the search results, so right-click
+  // Rename/Delete works the same whether or not a search is active.
+  const renderClientCard = (c) => (
+    <li key={c.id} className="card" onContextMenu={isOperator ? undefined : (e) => handleContextMenu(e, c)}>
+      {renamingId === c.id ? (
+        <input
+          autoFocus
+          value={renameValue}
+          onChange={(e) => setRenameValue(e.target.value)}
+          onBlur={() => {
+            if (skipBlurSaveRef.current) {
+              skipBlurSaveRef.current = false;
+              return;
+            }
+            submitRename(c.id);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") e.target.blur();
+            if (e.key === "Escape") cancelRename();
+          }}
+        />
+      ) : (
+        <Link to={clientPartsHref(c.id)}>
+          <strong>{c.name}</strong>
+        </Link>
+      )}
+    </li>
+  );
+
   return (
     <div className="page">
       <PageNav backTo="/" backLabel="Back to Home" items={[{ label: "Home", to: "/" }, { label: "Customers" }]} />
@@ -213,13 +242,7 @@ export default function Clients() {
             <p className="muted">No matching customers.</p>
           ) : (
             <ul className="card-list">
-              {matchedClients.slice(0, MAX_RESULTS).map((c) => (
-                <li key={c.id} className="card">
-                  <Link to={clientPartsHref(c.id)}>
-                    <strong>{c.name}</strong>
-                  </Link>
-                </li>
-              ))}
+              {matchedClients.slice(0, MAX_RESULTS).map(renderClientCard)}
               {matchedClients.length > MAX_RESULTS && (
                 <p className="muted">+{matchedClients.length - MAX_RESULTS} more — refine your search.</p>
               )}
@@ -252,32 +275,7 @@ export default function Clients() {
             <p>Loading...</p>
           ) : (
             <ul className="card-list">
-              {visibleClients.map((c) => (
-                <li key={c.id} className="card" onContextMenu={isOperator ? undefined : (e) => handleContextMenu(e, c)}>
-                  {renamingId === c.id ? (
-                    <input
-                      autoFocus
-                      value={renameValue}
-                      onChange={(e) => setRenameValue(e.target.value)}
-                      onBlur={() => {
-                        if (skipBlurSaveRef.current) {
-                          skipBlurSaveRef.current = false;
-                          return;
-                        }
-                        submitRename(c.id);
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") e.target.blur();
-                        if (e.key === "Escape") cancelRename();
-                      }}
-                    />
-                  ) : (
-                    <Link to={clientPartsHref(c.id)}>
-                      <strong>{c.name}</strong>
-                    </Link>
-                  )}
-                </li>
-              ))}
+              {visibleClients.map(renderClientCard)}
               {visibleClients.length === 0 && (
                 <p className="muted">
                   {isOperator

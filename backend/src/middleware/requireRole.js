@@ -2,6 +2,7 @@
 function requireRole(...allowedRoles) {
   return (req, res, next) => {
     if (!allowedRoles.includes(req.user?.role)) {
+      console.warn("[TEMP-DEBUG 403]", req.method, req.originalUrl, "user:", req.user?.id, req.user?.username, "role:", req.user?.role, "allowed:", allowedRoles);
       return res.status(403).json({ error: "Forbidden" });
     }
     next();

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useSearchParams } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { api } from "../api/client";
-import { greeting, timeAgo, ROLE_LABELS, resultLabel, typeLabel } from "../lib/format";
+import { greeting, timeAgo, ROLE_LABELS, resultLabel, typeLabel, orderRefLabel } from "../lib/format";
 import TrendLine from "../components/charts/TrendLine";
 import RankedBars from "../components/charts/RankedBars";
 import Meter from "../components/charts/Meter";
@@ -113,11 +113,11 @@ function DashboardHero({ title, roleView }) {
   );
 }
 
-// Last few signed (approved/rejected) Data Sheets -- see GET
-// /api/inspections/dashboard-stats, which scopes this the same way as the
-// counts above (company-wide for QC, mine-only for Operator).
-// Who performed it: the operation's scope is authoritative for In-Process
-// (Operator and QC each have their own list), otherwise the creator's role.
+// Signed Data Sheets, newest first -- see GET /api/inspections/recent-activity
+// (one row per sheet as of its latest signature; operators only ever get
+// their own). Who performed it: the operation's scope is authoritative for
+// In-Process (Operator and QC each have their own list), otherwise the
+// creator's role.
 function performerLabel(a) {
   if (a.operation_scope === "in_process_operator") return "Operator";
   if (a.operation_scope === "in_process_qc") return "QC";
@@ -126,58 +126,285 @@ function performerLabel(a) {
   return null;
 }
 
-function RecentActivity({ items }) {
+const ACTIVITY_PAGE_SIZE = 10;
+const ACTIVITY_TYPE_FILTERS = [
+  ["", "All"],
+  ["final", "Final"],
+  ["in_process", "In-Process"],
+  ["setup", "Set-up"],
+  ["incoming", "Incoming"],
+  ["samples", "Samples"],
+];
+const EMPTY_ACTIVITY_FILTERS = { type: "", client_id: "", result: "", q: "" };
+const ACTIVITY_BADGE = {
+  approved: "Approved",
+  conditionally_approved: "Conditional",
+  rejected: "Rejected",
+};
+
+// Filters survive going into a Data Sheet and coming back (sessionStorage,
+// per dashboard variant) -- purely a convenience, so any storage failure
+// just falls back to no filters.
+function loadActivityFilters(storageKey) {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(storageKey) || "null");
+    return saved ? { ...EMPTY_ACTIVITY_FILTERS, ...saved } : EMPTY_ACTIVITY_FILTERS;
+  } catch {
+    return EMPTY_ACTIVITY_FILTERS;
+  }
+}
+
+function saveActivityFilters(storageKey, filters) {
+  try {
+    sessionStorage.setItem(storageKey, JSON.stringify(filters));
+  } catch {
+    // ignore -- see loadActivityFilters
+  }
+}
+
+function parseDbTime(value) {
+  return new Date(String(value).replace(" ", "T") + "Z");
+}
+
+function activityDayLabel(value) {
+  const d = parseDbTime(value);
+  if (Number.isNaN(d.getTime())) return "";
+  const startOfDay = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const days = Math.round((startOfDay(new Date()) - startOfDay(d)) / 86400000);
+  if (days === 0) return "Today";
+  if (days === 1) return "Yesterday";
+  return d.toLocaleDateString(undefined, {
+    weekday: "long",
+    month: "short",
+    day: "numeric",
+    ...(d.getFullYear() !== new Date().getFullYear() && { year: "numeric" }),
+  });
+}
+
+function activityTime(value, isToday) {
+  if (isToday) return timeAgo(value);
+  const d = parseDbTime(value);
+  return Number.isNaN(d.getTime()) ? "" : d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+}
+
+function activityResult(a) {
+  if (a.status === "approved" && a.conditional_reason?.trim()) return "conditionally_approved";
+  return a.status;
+}
+
+// baseParams is the dashboard's fixed scope (e.g. the Operator dashboard's
+// { mine: 1, type: "in_process" }); showTypeFilter hides the type chips
+// where that scope already pins the type.
+function RecentActivity({ baseParams = {}, showTypeFilter = true, storageKey = "recentActivityFilters" }) {
   const location = useLocation();
-  if (!items || items.length === 0) return null;
+  const [filters, setFilters] = useState(() => loadActivityFilters(storageKey));
+  const [search, setSearch] = useState(filters.q);
+  const [items, setItems] = useState([]);
+  const [customers, setCustomers] = useState([]);
+  const [hasMore, setHasMore] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [error, setError] = useState(null);
+  const baseKey = JSON.stringify(baseParams);
+
+  // Debounce typing in the search box into the actual filter.
+  useEffect(() => {
+    const t = setTimeout(() => setFilters((f) => (f.q === search ? f : { ...f, q: search })), 300);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  // The dashboard's fixed scope wins over any user filter it pins.
+  const queryParams = useMemo(() => ({ ...filters, ...JSON.parse(baseKey) }), [baseKey, filters]);
+
+  useEffect(() => {
+    saveActivityFilters(storageKey, filters);
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    api
+      .getRecentActivity({ ...queryParams, limit: ACTIVITY_PAGE_SIZE, offset: 0 })
+      .then((data) => {
+        if (cancelled) return;
+        setItems(data.items);
+        setHasMore(data.hasMore);
+        setCustomers(data.customers);
+      })
+      .catch((e) => !cancelled && setError(e.message))
+      .finally(() => !cancelled && setLoading(false));
+    return () => {
+      cancelled = true;
+    };
+  }, [queryParams, storageKey, filters]);
+
+  const loadMore = () => {
+    setLoadingMore(true);
+    api
+      .getRecentActivity({ ...queryParams, limit: ACTIVITY_PAGE_SIZE, offset: items.length })
+      .then((data) => {
+        setItems((prev) => [...prev, ...data.items]);
+        setHasMore(data.hasMore);
+      })
+      .catch((e) => setError(e.message))
+      .finally(() => setLoadingMore(false));
+  };
+
+  const setFilter = (key, value) => setFilters((f) => ({ ...f, [key]: value }));
+  const clearFilters = () => {
+    setSearch("");
+    setFilters(EMPTY_ACTIVITY_FILTERS);
+  };
+  const hasFilters = Object.entries(filters).some(
+    ([key, v]) => v !== "" && (showTypeFilter || key !== "type")
+  );
+
+  // Nothing ever signed yet in this scope -- same as before: no section at all.
+  if (!loading && !error && items.length === 0 && !hasFilters && customers.length === 0) return null;
+
   // Back from the Data Sheet returns here (incl. ?tab=activity), not to the
   // operation page -- see InspectionCapture's returnTo.
   const returnTo = { to: location.pathname + location.search, label: "Back to Dashboard" };
+
+  const groups = [];
+  items.forEach((a) => {
+    const label = activityDayLabel(a.at);
+    const last = groups[groups.length - 1];
+    if (last && last.label === label) last.items.push(a);
+    else groups.push({ label, items: [a] });
+  });
+
   return (
     <div className="recent-activity">
-      <h2>Recent Activity</h2>
-      <ul className="activity-list">
-        {items.map((a) => {
-          const performer = performerLabel(a);
-          return (
-          <li key={`${a.inspection_id}-${a.at}`} className="activity-item">
-            <span className={`activity-dot activity-dot-${a.action}`} />
-            <Link to={`/inspections/${a.inspection_id}`} state={{ returnTo }} className="activity-link">
-              <span className="activity-main">
-                <strong>{a.part_number}</strong>
-                <span className="muted"> · {a.client_name}</span>
-                {a.job_number && <span className="muted"> · WO# {a.job_number}</span>}
-              </span>
-              <span className="activity-meta">
-                <span className="activity-type">{typeLabel(a.type)}</span>
-                {a.operation_name && <span> · {a.operation_name}</span>}
-                {performer && <span> · by {performer}</span>}
-              </span>
-            </Link>
-            <span className={`activity-action activity-action-${a.action}`}>
-              {a.action === "approved" ? "Approved" : "Rejected"}
-            </span>
-            <span className="activity-time muted">{timeAgo(a.at)}</span>
-          </li>
-          );
-        })}
-      </ul>
+      <div className="activity-header">
+        <h2>Recent Activity</h2>
+        {hasFilters && (
+          <button type="button" className="link-button" onClick={clearFilters}>
+            Clear filters
+          </button>
+        )}
+      </div>
+
+      <div className="activity-filters">
+        {showTypeFilter && (
+          <div className="activity-chips" role="group" aria-label="Inspection type">
+            {ACTIVITY_TYPE_FILTERS.map(([key, label]) => (
+              <button
+                key={key || "all"}
+                type="button"
+                className={`activity-chip${filters.type === key ? " activity-chip-active" : ""}`}
+                aria-pressed={filters.type === key}
+                onClick={() => setFilter("type", key)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
+        <div className="activity-filter-controls">
+          <input
+            type="search"
+            className="activity-search"
+            placeholder="Search part #, WO# or PO#"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            aria-label="Search part number, work order or PO number"
+          />
+          <select
+            value={filters.client_id}
+            onChange={(e) => setFilter("client_id", e.target.value)}
+            aria-label="Customer"
+          >
+            <option value="">All customers</option>
+            {customers.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name}
+              </option>
+            ))}
+          </select>
+          <select value={filters.result} onChange={(e) => setFilter("result", e.target.value)} aria-label="Result">
+            <option value="">Any result</option>
+            <option value="approved">Approved</option>
+            <option value="conditionally_approved">Conditionally approved</option>
+            <option value="rejected">Rejected</option>
+          </select>
+        </div>
+      </div>
+
+      {error && <p className="error">{error}</p>}
+
+      {loading && items.length === 0 ? (
+        <p className="muted activity-empty">Loading…</p>
+      ) : items.length === 0 ? (
+        <div className="activity-empty">
+          <p className="muted">No signed Data Sheets match these filters.</p>
+          {hasFilters && (
+            <button type="button" className="link-button" onClick={clearFilters}>
+              Clear filters
+            </button>
+          )}
+        </div>
+      ) : (
+        <div className={`activity-groups${loading ? " activity-groups-loading" : ""}`}>
+          {groups.map((group) => (
+            <section key={group.label} className="activity-group">
+              <h3 className="activity-day">{group.label}</h3>
+              <ul className="activity-list">
+                {group.items.map((a) => {
+                  const performer = performerLabel(a);
+                  const result = activityResult(a);
+                  return (
+                    <li key={a.inspection_id} className="activity-item">
+                      <span className={`activity-dot activity-dot-${result}`} />
+                      <Link to={`/inspections/${a.inspection_id}`} state={{ returnTo }} className="activity-link">
+                        <span className="activity-main">
+                          <strong>{a.part_number}</strong>
+                          <span className="muted"> · {a.client_name}</span>
+                          {orderRefLabel(a) && <span className="muted"> · {orderRefLabel(a)}</span>}
+                        </span>
+                        <span className="activity-meta">
+                          <span className="activity-type">{typeLabel(a.type)}</span>
+                          {a.operation_name && <span> · {a.operation_name}</span>}
+                          {a.signer_name ? (
+                            <span>
+                              {" "}
+                              · signed by {a.signer_name}
+                              {performer === "Operator" ? " (Operator)" : ""}
+                            </span>
+                          ) : (
+                            performer && <span> · by {performer}</span>
+                          )}
+                        </span>
+                      </Link>
+                      <span
+                        className={`activity-action activity-action-${result}`}
+                        title={result === "conditionally_approved" ? `Conditionally approved: ${a.conditional_reason}` : undefined}
+                      >
+                        {ACTIVITY_BADGE[result] ?? result}
+                      </span>
+                      <span className="activity-time muted" title={parseDbTime(a.at).toLocaleString()}>
+                        {activityTime(a.at, group.label === "Today")}
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            </section>
+          ))}
+          {hasMore && (
+            <button type="button" className="secondary-btn activity-more" onClick={loadMore} disabled={loadingMore}>
+              {loadingMore ? "Loading…" : "Show more"}
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
 function QcHome() {
-  const [stats, setStats] = useState(null);
-  const [error, setError] = useState(null);
-
-  useEffect(() => {
-    api.getDashboardStats().then(setStats).catch((e) => setError(e.message));
-  }, []);
-
   return (
     <>
       <DashboardHero title="Select Inspection Type" roleView="qc" />
       <div className="page">
-        {error && <p className="error">{error}</p>}
         <div className="type-grid">
           {INSPECTION_TYPES.map((t) =>
             t.enabled ? (
@@ -198,28 +425,20 @@ function QcHome() {
             )
           )}
         </div>
-        {stats && <RecentActivity items={stats.recentActivity} />}
+        <RecentActivity storageKey="recentActivityFilters:qc" />
       </div>
     </>
   );
 }
 
+// Module-level so it's a stable reference for RecentActivity's effect.
+const OPERATOR_ACTIVITY_SCOPE = { mine: 1, type: "in_process" };
+
 function OperatorHome() {
-  const [stats, setStats] = useState(null);
-  const [error, setError] = useState(null);
-
-  useEffect(() => {
-    api
-      .getDashboardStats({ mine: 1, type: "in_process" })
-      .then(setStats)
-      .catch((e) => setError(e.message));
-  }, []);
-
   return (
     <>
       <DashboardHero title="Operator Home" roleView="operator" />
       <div className="page">
-        {error && <p className="error">{error}</p>}
         <div className="type-grid">
           <Link to="/clients?type=in_process" className="type-card">
             <span className="type-card-icon">
@@ -234,7 +453,11 @@ function OperatorHome() {
             <strong>Check approval status</strong>
           </Link>
         </div>
-        {stats && <RecentActivity items={stats.recentActivity} />}
+        <RecentActivity
+          baseParams={OPERATOR_ACTIVITY_SCOPE}
+          showTypeFilter={false}
+          storageKey="recentActivityFilters:operator"
+        />
       </div>
     </>
   );
@@ -605,7 +828,6 @@ const ENGINEER_TABS = [
 ];
 
 function EngineerHome() {
-  const [stats, setStats] = useState(null);
   const [analytics, setAnalytics] = useState(null);
   const [error, setError] = useState(null);
   const [jumpToPart, setJumpToPart] = useState(null);
@@ -617,7 +839,6 @@ function EngineerHome() {
   const setTab = (key) => setSearchParams(key === "trends" ? {} : { tab: key }, { replace: true });
 
   useEffect(() => {
-    api.getDashboardStats().then(setStats).catch((e) => setError(e.message));
     api.getAnalytics().then(setAnalytics).catch((e) => setError(e.message));
   }, []);
 
@@ -650,7 +871,7 @@ function EngineerHome() {
 
             {tab === "trends" && analytics && <TrendsTab analytics={analytics} />}
             {tab === "lookup" && <PartAnalyticsSection jumpToPart={jumpToPart} />}
-            {tab === "activity" && stats && <RecentActivity items={stats.recentActivity} />}
+            {tab === "activity" && <RecentActivity storageKey="recentActivityFilters:engineer" />}
           </div>
 
           <div className="engineer-layout-sidebar">

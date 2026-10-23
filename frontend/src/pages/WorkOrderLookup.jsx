@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api/client";
 import PageNav from "../components/PageNav";
-import { resultStatus, resultLabel, TYPE_LABELS, formatDateTime } from "../lib/format";
+import { resultStatus, resultLabel, TYPE_LABELS, formatDate } from "../lib/format";
 
 // Fixed display order regardless of which types the search actually found --
 // so a missing type still renders as its own "Not recorded" row instead of
@@ -106,7 +106,7 @@ export default function WorkOrderLookup() {
                               {resultLabel(resultStatus(i))}
                             </span>{" "}
                             <span className="muted">
-                              {formatDateTime(i.date)} · {i.inspector || "—"}
+                              {formatDate(i.date)} · {i.inspector || "—"}
                             </span>{" "}
                             <Link to={`/inspections/${i.id}`}>Open</Link>
                             {" · "}

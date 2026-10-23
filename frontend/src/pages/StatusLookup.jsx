@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { api } from "../api/client";
 import PageNav from "../components/PageNav";
-import { resultStatus, resultLabel } from "../lib/format";
+import { resultStatus, resultLabel, formatDate } from "../lib/format";
 
 export default function StatusLookup() {
   const [partNumber, setPartNumber] = useState("");
@@ -72,7 +72,7 @@ export default function StatusLookup() {
                 <td>
                   <span className={`status status-${resultStatus(r)}`}>{resultLabel(resultStatus(r))}</span>
                 </td>
-                <td>{r.date}</td>
+                <td>{formatDate(r.date)}</td>
                 <td>{r.inspector || "—"}</td>
               </tr>
             ))}

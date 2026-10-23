@@ -4,7 +4,7 @@ import { api } from "../api/client";
 import { useAuth } from "../context/AuthContext";
 import { useConfirm } from "../hooks/useConfirm";
 import PageNav from "../components/PageNav";
-import { resultStatus, resultLabel } from "../lib/format";
+import { resultStatus, resultLabel, formatDate, orderRefLabel } from "../lib/format";
 
 // Matches backend/src/routes/inspections.js's requireRole("admin",
 // "supervisor") on both DELETE /:id and PUT /:id/unlock, and the same list
@@ -180,7 +180,7 @@ export default function InspectionHistory() {
             <tr>
               <th>Customer</th>
               <th>Part</th>
-              <th>WO#</th>
+              <th>WO# / PO#</th>
               <th>Type</th>
               <th>Date</th>
               <th>By</th>
@@ -193,9 +193,9 @@ export default function InspectionHistory() {
               <tr key={i.id} onContextMenu={canManage ? (e) => handleContextMenu(e, i) : undefined}>
                 <td>{i.client_name}</td>
                 <td>{i.part_number}</td>
-                <td>{i.job_number || "—"}</td>
+                <td>{orderRefLabel(i) ?? "—"}</td>
                 <td>{i.type}</td>
-                <td>{i.date}</td>
+                <td>{formatDate(i.date)}</td>
                 <td>{i.created_by_name || "—"}</td>
                 <td>
                   <span className={`status status-${resultStatus(i)}`}>{resultLabel(resultStatus(i))}</span>

@@ -2,9 +2,34 @@
 // still used for routing, but never shown as the label.
 export function inspectionLabel(inspection) {
   const partNumber = inspection.part_number || `Part #${inspection.part_id}`;
-  const wo = inspection.job_number ? `WO# ${inspection.job_number}` : "WO# —";
-  const date = inspection.date ? inspection.date.slice(0, 10) : "—";
-  return `${partNumber} — ${wo} — ${date}`;
+  return `${partNumber} — ${orderRefLabel(inspection) ?? `${orderRefKind(inspection)} —`} — ${formatDate(inspection.date)}`;
+}
+
+// The order an inspection is tracked by: Incoming material comes in on a
+// supplier's PO# (inspections.po_number), everything else runs on a shop
+// Job#/WO# (inspections.job_number). Matches the Data Sheet header fields.
+export function orderRefKind(inspection) {
+  return inspection.type === "incoming" ? "PO#" : "WO#";
+}
+
+export function orderRefValue(inspection) {
+  return (inspection.type === "incoming" ? inspection.po_number : inspection.job_number) || null;
+}
+
+// "PO# 96664" / "WO# 9777", or null when none was entered.
+export function orderRefLabel(inspection) {
+  const value = orderRefValue(inspection);
+  return value ? `${orderRefKind(inspection)} ${value}` : null;
+}
+
+// MM/DD/YYYY for an inspection/header date ("YYYY-MM-DD", or a legacy
+// "YYYY-MM-DD HH:MM:SS"). Rearranges the stored calendar date as text rather
+// than going through Date, so it can never shift a day across time zones.
+// The backend PDF (src/pdf/inspectionSheet.js formatDate) mirrors this.
+export function formatDate(value) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value ?? ""));
+  if (!m) return value ? String(value) : "—";
+  return `${m[2]}/${m[3]}/${m[1]}`;
 }
 
 // 'conditionally_approved' isn't a real inspections.status value (see PUT
@@ -60,10 +85,10 @@ export function formatDateTime(value) {
   if (!value) return "—";
   const d = new Date(value.replace(" ", "T") + "Z");
   if (Number.isNaN(d.getTime())) return value;
-  return d.toLocaleString(undefined, {
+  return d.toLocaleString("en-US", {
+    month: "2-digit",
+    day: "2-digit",
     year: "numeric",
-    month: "short",
-    day: "numeric",
     hour: "numeric",
     minute: "2-digit",
   });

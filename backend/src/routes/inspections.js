@@ -15,6 +15,7 @@ const { parsePassFailState } = require("../lib/passfail");
 const attachRole = require("../middleware/attachRole");
 const requireRole = require("../middleware/requireRole");
 const { isAssignedToClient } = require("../lib/operatorAccess");
+const { computeWithinTolerance } = require("../lib/tolerance");
 
 const router = express.Router();
 
@@ -126,23 +127,22 @@ function hasQualifyingInProcess(partId, jobNumber) {
   return !!row.found;
 }
 
-// Supports one-sided specs (max-only = "must not exceed", min-only = "must be at
-// least") as well as two-sided tolerance bands. Returns null when neither bound
-// is set, since there's nothing to check the measurement against.
-function computeWithinTolerance(point, measuredValue) {
-  if (!point || measuredValue == null) return null;
-  // Points with no spec accept free text (e.g. "OK" on a Fixture check) --
-  // never numerically comparable, so nothing to flag.
-  if (typeof measuredValue !== "number" || Number.isNaN(measuredValue)) return null;
-  const hasMax = point.max_spec != null;
-  const hasMin = point.min_spec != null;
-  if (!hasMax && !hasMin) return null;
-  if (hasMax && measuredValue > point.max_spec) return 0;
-  if (hasMin && measuredValue < point.min_spec) return 0;
-  return 1;
-}
-
 // GET /api/inspections?part_id=1&type=final&client_id=1&status=approved&date_from=2026-01-01&date_to=2026-12-31&operation_id=1&job_number=12345
+// A "blank" Data Sheet: opened (still in_progress, never signed) but nothing
+// recorded on it -- no measurements, 100% tallies, sample-log rows, photos
+// or certs. Header fields alone don't count. These can be discarded by QC
+// and (for their own In-Process sheets) Operators, not just admin/supervisor
+// -- see DELETE /:id. `i` must be the inspections alias in scope.
+const IS_BLANK_SQL = `(
+  i.status = 'in_progress'
+  AND NOT EXISTS (SELECT 1 FROM signatures x WHERE x.inspection_id = i.id)
+  AND NOT EXISTS (SELECT 1 FROM measurements x WHERE x.inspection_id = i.id)
+  AND NOT EXISTS (SELECT 1 FROM inspection_point_summaries x WHERE x.inspection_id = i.id)
+  AND NOT EXISTS (SELECT 1 FROM inspection_sample_rows x WHERE x.inspection_id = i.id)
+  AND NOT EXISTS (SELECT 1 FROM inspection_photos x WHERE x.inspection_id = i.id)
+  AND NOT EXISTS (SELECT 1 FROM inspection_certs x WHERE x.inspection_id = i.id)
+)`;
+
 router.get("/", (req, res) => {
   const { part_id, type, client_id, status, date_from, date_to, operation_id, job_number } = req.query;
 
@@ -152,7 +152,8 @@ router.get("/", (req, res) => {
   // (older rows, or ones created some other way) and shouldn't drop the
   // inspection from the list just because that link is missing.
   let query = `
-    SELECT i.*, p.part_number, p.client_id, c.name AS client_name, u.full_name AS created_by_name
+    SELECT i.*, p.part_number, p.client_id, c.name AS client_name, u.full_name AS created_by_name,
+           ${IS_BLANK_SQL} AS is_blank
     FROM inspections i
     JOIN parts p ON p.id = i.part_id
     JOIN clients c ON c.id = p.client_id
@@ -301,6 +302,92 @@ router.get("/dashboard-stats", (req, res) => {
   res.json({ openCount, approvedCount, rejectedCount, recentActivity });
 });
 
+// GET /api/inspections/recent-activity?type=&client_id=&result=&q=&limit=&offset=&mine=1
+// Home's Recent Activity feed: one row per signed Data Sheet, as of its
+// LATEST signature -- a sheet reopened and re-signed shows once (not once
+// per signing), and one reopened but not yet re-signed drops out until it's
+// signed again. `result` is the UI-facing result (conditionally_approved is
+// status='approved' + conditional_reason, see PUT /:id/status). `mine` means
+// sheets the user created OR last signed (operators sign their own In-Process
+// sheets now, even ones QC set up for them); operators always get `mine`.
+// `customers` lists every customer with signed activity in the same
+// mine/type scope (ignoring the other filters), for the Customer dropdown.
+router.get("/recent-activity", attachRole, (req, res) => {
+  const { type, client_id, result, q } = req.query;
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 10, 1), 50);
+  const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+  const mine = req.user.role === "operator" || !!req.query.mine;
+
+  const scope = ["i.status IN ('approved', 'rejected')"];
+  const scopeParams = [];
+  if (mine) {
+    scope.push("(i.created_by = ? OR s.user_id = ?)");
+    scopeParams.push(req.user.id, req.user.id);
+  }
+  if (type) {
+    scope.push("i.type = ?");
+    scopeParams.push(type);
+  }
+
+  // Each signed sheet joined to its latest signature -- shared by the feed
+  // and the customer list so both see the same scope.
+  const fromLatestSignature = `
+       FROM inspections i
+       JOIN signatures s ON s.id = (
+         SELECT s2.id FROM signatures s2 WHERE s2.inspection_id = i.id
+         ORDER BY s2.signed_at DESC, s2.id DESC LIMIT 1
+       )
+       JOIN parts p ON p.id = i.part_id
+       JOIN clients c ON c.id = p.client_id`;
+
+  const filters = [...scope];
+  const filterParams = [...scopeParams];
+  if (client_id) {
+    filters.push("p.client_id = ?");
+    filterParams.push(Number(client_id));
+  }
+  if (result === "approved") {
+    filters.push("i.status = 'approved' AND COALESCE(TRIM(i.conditional_reason), '') = ''");
+  } else if (result === "conditionally_approved") {
+    filters.push("i.status = 'approved' AND COALESCE(TRIM(i.conditional_reason), '') <> ''");
+  } else if (result === "rejected") {
+    filters.push("i.status = 'rejected'");
+  }
+  if (q && q.trim()) {
+    filters.push("(p.part_number LIKE ? OR i.job_number LIKE ? OR i.po_number LIKE ?)");
+    const like = `%${q.trim()}%`;
+    filterParams.push(like, like, like);
+  }
+
+  const rows = db
+    .prepare(
+      `SELECT i.id AS inspection_id, i.type, i.status, i.conditional_reason, i.job_number, i.po_number,
+              s.signed_at AS at, signer.full_name AS signer_name,
+              p.part_number, c.id AS client_id, c.name AS client_name,
+              o.name AS operation_name, o.scope AS operation_scope,
+              u.role AS creator_role
+       ${fromLatestSignature}
+       LEFT JOIN users signer ON signer.id = s.user_id
+       LEFT JOIN operations o ON o.id = i.operation_id
+       LEFT JOIN users u ON u.id = i.created_by
+       WHERE ${filters.join(" AND ")}
+       ORDER BY s.signed_at DESC, s.id DESC
+       LIMIT ? OFFSET ?`
+    )
+    .all(...filterParams, limit + 1, offset);
+
+  const customers = db
+    .prepare(
+      `SELECT DISTINCT c.id, c.name
+       ${fromLatestSignature}
+       WHERE ${scope.join(" AND ")}
+       ORDER BY c.name COLLATE NOCASE`
+    )
+    .all(...scopeParams);
+
+  res.json({ items: rows.slice(0, limit), hasMore: rows.length > limit, customers });
+});
+
 // GET /api/inspections/analytics -- the Engineer dashboard's charts.
 // Company-wide only (no mine=1 scoping like dashboard-stats above) since
 // trend/tolerance analysis across parts doesn't make sense scoped to one
@@ -347,7 +434,7 @@ router.get("/analytics", attachRole, requireRole("qc", "admin", "engineer", "sup
   // not all Data Sheets have real numeric readings; a specless (Fixture/
   // Visual-style) column stores "OK"/"NOT OK ..." text instead, with
   // within_tolerance always null for those (nothing numeric to compare --
-  // see computeWithinTolerance above). Treating a "NOT OK" the same as a
+  // see computeWithinTolerance in lib/tolerance.js). Treating a "NOT OK" the same as a
   // numeric out-of-tolerance reading is what makes this dashboard reflect
   // the majority of what's actually recorded, not just the numeric slice.
   // One pass over every non-blank row builds all three of tolerance /
@@ -475,7 +562,7 @@ function getInspectionDetail(id) {
   const inspection = db
     .prepare(
       `SELECT i.*, p.part_number, p.description AS part_description, p.client_id,
-              c.name AS client_name, o.scope AS operation_scope
+              c.name AS client_name, o.name AS operation_name, o.scope AS operation_scope
        FROM inspections i
        JOIN parts p ON p.id = i.part_id
        JOIN clients c ON c.id = p.client_id
@@ -1325,10 +1412,45 @@ router.put("/:id/unlock", attachRole, requireRole("admin", "supervisor"), (req, 
 // DELETE /api/inspections/:id  (cascades to its measurements and signatures)
 // Deliberately narrower than every other write route on this file -- QC can
 // create/edit/sign a Data Sheet but not erase an already-saved one. Only
-// admin and supervisor (a role that exists mainly for this) can.
-router.delete("/:id", attachRole, requireRole("admin", "supervisor"), (req, res) => {
-  const result = db.prepare("DELETE FROM inspections WHERE id = ?").run(req.params.id);
-  if (result.changes === 0) return res.status(404).json({ error: "Inspection not found" });
+// admin and supervisor (a role that exists mainly for this) can delete any
+// sheet. The one exception is a blank sheet (IS_BLANK_SQL -- opened but
+// nothing ever recorded): QC can discard any of those, and an Operator can
+// discard their own Operator In-Process ones for an assigned customer.
+router.delete("/:id", attachRole, (req, res) => {
+  const role = req.user.role;
+  const target = db
+    .prepare(
+      `SELECT i.id, i.type, p.client_id, o.scope AS operation_scope, ${IS_BLANK_SQL} AS is_blank
+       FROM inspections i
+       JOIN parts p ON p.id = i.part_id
+       LEFT JOIN operations o ON o.id = i.operation_id
+       WHERE i.id = ?`
+    )
+    .get(req.params.id);
+  if (!target) return res.status(404).json({ error: "Inspection not found" });
+
+  if (!["admin", "supervisor"].includes(role)) {
+    if (role === "operator") {
+      if (target.type !== "in_process" || target.operation_scope !== "in_process_operator") {
+        return res.status(403).json({ error: "Operators can only discard their own In-Process Data Sheets." });
+      }
+      if (!isAssignedToClient(req.user.id, target.client_id)) {
+        return res.status(403).json({ error: "You're not assigned to this customer." });
+      }
+    } else if (role !== "qc") {
+      return res.status(403).json({ error: "You don't have permission to delete Data Sheets." });
+    }
+    if (!target.is_blank) {
+      return res.status(409).json({
+        error:
+          "This Data Sheet already has recorded data, so it can't be discarded. Ask an admin or supervisor to delete it.",
+      });
+    }
+  }
+
+  // Leaves a trace in audit_log (keyed to the now-gone id) of who removed it.
+  recordAudit("inspection", target.id, "deleted", req.user.id, { blank: !!target.is_blank, type: target.type });
+  db.prepare("DELETE FROM inspections WHERE id = ?").run(target.id);
   res.status(204).send();
 });
 

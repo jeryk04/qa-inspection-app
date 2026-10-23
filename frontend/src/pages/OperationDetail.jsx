@@ -9,10 +9,10 @@ import TemplateEditLink from "../components/TemplateEditLink";
 
 // Matches DataSheetTemplate.jsx's own guard.
 const TEMPLATE_EDIT_ROLES = ["qc", "admin", "engineer", "supervisor"];
-// This deletes an already-saved inspection (not the operation) -- matches
-// backend/src/routes/inspections.js's requireRole("admin", "supervisor") on
-// DELETE /:id, deliberately narrower than every other role check on this
-// page: QC can create/edit/sign a Data Sheet but not erase one.
+// This deletes any inspection (not the operation) -- matches backend/src/
+// routes/inspections.js's DELETE /:id, where only admin/supervisor can erase
+// a sheet with recorded data. QC, and an Operator on their own In-Process
+// list, can only discard blank ones (see canDiscardBlank below).
 const CAN_DELETE_ROLES = ["admin", "supervisor"];
 
 // Mirrors Inspections.jsx's "Data Sheet folder + history" structure, scoped
@@ -38,6 +38,8 @@ export default function OperationDetail() {
   const canDelete = CAN_DELETE_ROLES.includes(user?.role);
   const [searchParams] = useSearchParams();
   const type = searchParams.get("type") || "in_process";
+  const canDiscardBlank =
+    canDelete || user?.role === "qc" || (user?.role === "operator" && type === "in_process");
   const typeLabel = TYPE_LABELS[type] ?? type;
   const navigate = useNavigate();
   const [part, setPart] = useState(null);
@@ -87,6 +89,19 @@ export default function OperationDetail() {
   const handleContextMenu = (e, inspection) => {
     e.preventDefault();
     setContextMenu({ inspectionId: inspection.id, x: e.clientX, y: e.clientY });
+  };
+
+  // Blank sheets (opened, nothing recorded -- see IS_BLANK_SQL in the
+  // backend) get a visible Discard button for the wider set of roles below,
+  // since right-click isn't a thing on the shop-floor tablets.
+  const handleDiscard = async (inspection) => {
+    if (!(await confirm("Discard this empty Data Sheet? Nothing has been recorded on it."))) return;
+    try {
+      await api.deleteInspection(inspection.id);
+      load();
+    } catch (e) {
+      setError(e.message);
+    }
   };
 
   const handleDelete = async (inspection) => {
@@ -168,12 +183,22 @@ export default function OperationDetail() {
           <h3>{year}</h3>
           <ul className="card-list">
             {yearInspections.map((i) => (
-              <li key={i.id} className="card" onContextMenu={canDelete ? (e) => handleContextMenu(e, i) : undefined}>
+              <li
+                key={i.id}
+                className="card card-row"
+                onContextMenu={canDelete ? (e) => handleContextMenu(e, i) : undefined}
+              >
                 <Link to={`/inspections/${i.id}`}>
                   <strong>{inspectionLabel(i)}</strong>
                   <span className="muted"> · </span>
                   <span className={`status status-${resultStatus(i)}`}>{resultLabel(resultStatus(i))}</span>
+                  {!!i.is_blank && <span className="muted blank-note"> · nothing recorded</span>}
                 </Link>
+                {!!i.is_blank && canDiscardBlank && (
+                  <button type="button" className="discard-btn" onClick={() => handleDiscard(i)}>
+                    Discard
+                  </button>
+                )}
               </li>
             ))}
           </ul>

@@ -4,6 +4,8 @@ const path = require("path");
 const db = require("../db");
 const attachRole = require("../middleware/attachRole");
 const requireRole = require("../middleware/requireRole");
+const { recordAudit } = require("../lib/audit");
+const { recomputePointTolerance } = require("../lib/tolerance");
 
 const router = express.Router();
 
@@ -224,6 +226,16 @@ router.put("/:id", attachRole, requireRole("qc", "admin", "engineer", "superviso
   }
   const drawing = db.prepare("SELECT * FROM balloon_drawings WHERE id = ?").get(req.params.id);
   if (!drawing) return res.status(404).json({ error: "Drawing not found" });
+  // Still-open Data Sheets on this template follow its mode flags (the
+  // capture page already reads them live from the template), so the sheet's
+  // own copy -- what View/Print, the PDF and signing use -- must follow too.
+  // Signed sheets keep whatever they were signed with.
+  if (hundred_percent_inspection !== undefined || machine_log_mode !== undefined) {
+    db.prepare(
+      `UPDATE inspections SET hundred_percent_inspection = ?, machine_log_mode = ?
+       WHERE drawing_id = ? AND status = 'in_progress'`
+    ).run(drawing.hundred_percent_inspection, drawing.machine_log_mode, drawing.id);
+  }
   // Same shape as GET /:id (points included) -- the frontend keeps whatever
   // this returns as its current `drawing` state, and expects .points to
   // always be an array there.
@@ -289,14 +301,18 @@ router.put("/points/:id", attachRole, requireRole("qc", "admin", "engineer", "su
   const { balloon_number, max_spec, min_spec, mean_value, decimal_places, is_check_column, is_reference } = req.body;
   if (!balloon_number) return res.status(400).json({ error: "balloon_number is required" });
 
-  const result = db
-    .prepare(
+  const before = db.prepare("SELECT * FROM balloon_points WHERE id = ?").get(req.params.id);
+  if (!before) return res.status(404).json({ error: "Point not found" });
+
+  // Saving the new spec and re-checking every existing reading against it
+  // happen together -- see recomputePointTolerance for why.
+  const changed = db.transaction(() => {
+    db.prepare(
       `UPDATE balloon_points
        SET balloon_number = ?, max_spec = ?, min_spec = ?, mean_value = ?, decimal_places = ?, is_check_column = ?,
            is_reference = ?
        WHERE id = ?`
-    )
-    .run(
+    ).run(
       balloon_number,
       max_spec ?? null,
       min_spec ?? null,
@@ -306,8 +322,31 @@ router.put("/points/:id", attachRole, requireRole("qc", "admin", "engineer", "su
       is_reference ? 1 : 0,
       req.params.id
     );
+    const point = db.prepare("SELECT * FROM balloon_points WHERE id = ?").get(req.params.id);
+    return recomputePointTolerance(db, point);
+  })();
 
-  if (result.changes === 0) return res.status(404).json({ error: "Point not found" });
+  // A spec change that flipped any pass/fail result is logged on each affected
+  // Data Sheet's History, with the old and new spec, so it's traceable.
+  const byInspection = new Map();
+  for (const r of changed) {
+    if (!byInspection.has(r.inspection_id)) byInspection.set(r.inspection_id, []);
+    byInspection.get(r.inspection_id).push(r);
+  }
+  for (const [inspectionId, readings] of byInspection) {
+    recordAudit("inspection", inspectionId, "tolerance_rechecked", req.user.id, {
+      balloon_number,
+      old_spec: { min: before.min_spec, max: before.max_spec },
+      new_spec: { min: min_spec ?? null, max: max_spec ?? null },
+      changes: readings.map((r) => ({
+        sample_number: r.sample_number,
+        value: r.measured_value,
+        old_within_tolerance: r.within_tolerance,
+        new_within_tolerance: r.new_within_tolerance,
+      })),
+    });
+  }
+
   res.json(db.prepare("SELECT * FROM balloon_points WHERE id = ?").get(req.params.id));
 });
 

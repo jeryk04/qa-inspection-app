@@ -1,14 +1,11 @@
 import { useEffect, useState } from "react";
 import { Link, useLocation, useParams } from "react-router-dom";
 import { formatSpec } from "../lib/numeric";
-import { api } from "../api/client";
-import { resultStatus, resultLabel, formatDateTime } from "../lib/format";
+import { api, downloadInspectionPdf, inspectionPdfName } from "../api/client";
+import { resultStatus, resultLabel, formatDate } from "../lib/format";
 import { isSpecless, summarizeCheckPoint } from "../lib/passfail";
 import logo from "../assets/logo.png";
 
-// Same fallback pattern as api/client.js -- not exported from there, so
-// repeated locally (matches InspectionCapture.jsx/DataSheetTemplate.jsx).
-const BASE_URL = import.meta.env.VITE_API_URL || `${window.location.protocol}//${window.location.hostname}:3001/api`;
 
 // Only the types actually reachable from the UI (plus 'samples', which has
 // no paper-form checkbox of its own -- see schema.sql's inspections.type
@@ -46,6 +43,9 @@ const COMPANY = {
 // freshly-planned, still-empty sheet can be viewed/printed blank and filled
 // in on paper first.
 function withPlannedSamples(measuredSamples, inspection) {
+  // Machine log mode: n= is a piece count (the sum of each row's Qty), and
+  // each row is one log entry -- padding to n would add hundreds of blanks.
+  if (inspection.machine_log_mode) return measuredSamples;
   const target = Math.floor(Number(inspection.sampling_plan_n));
   if (!Number.isFinite(target) || target <= 0) return measuredSamples;
   const set = new Set(measuredSamples);
@@ -89,7 +89,13 @@ function WarningIcon() {
 function DataSheetReport({ inspection }) {
   const points = inspection.points ?? [];
   const result = resultStatus(inspection);
-  const samples = [...new Set(inspection.measurements.map((m) => m.sample_number))].sort((a, b) => a - b);
+  // A machine-log row can carry only a Qty/Machine #/Comment and no reading.
+  const samples = [
+    ...new Set([
+      ...inspection.measurements.map((m) => m.sample_number),
+      ...(inspection.machine_log_mode ? (inspection.sampleRows || []).map((r) => r.sample_number) : []),
+    ]),
+  ].sort((a, b) => a - b);
   const grid = Object.fromEntries(
     inspection.measurements.map((m) => [`${m.balloon_point_id}:${m.sample_number}`, m])
   );
@@ -104,21 +110,27 @@ function DataSheetReport({ inspection }) {
   // A specless (check) column reports as a qty-inspected/qty-rejected
   // summary instead of one row per piece only when (a) it has an explicit
   // point-summary (hundred_percent_inspection mode -- possibly with zero
-  // measurements rows to fall back on), (b) the sheet is a 100% inspection
-  // (flag set, or the sampling plan covers the whole quantity), or (c) the
-  // sheet is nothing but check columns with more than a handful of rows. A
-  // check sampled alongside measured dimensions on a normal sampling plan
-  // stays in the grid, one row per sample, lined up with those dimensions.
+  // measurements rows to fall back on), (b) the 100% Inspection flag is set,
+  // or (c) there are more than a handful of rows and the sheet is either an
+  // implied 100% inspection (the sampling plan covers the whole quantity) or
+  // nothing but check columns. A short implied-100% sheet -- e.g. a 5-piece
+  // FAI with n=5 -- keeps its per-sample OKs in the grid, same as capture
+  // showed them, rather than collapsing 5 rows into a tally.
   const SUMMARIZE_THRESHOLD = 10;
   const hasExplicitSummary = (p) => (inspection.pointSummaries || []).some((s) => s.balloon_point_id === p.id);
   const planN = Number(inspection.sampling_plan_n);
   const qty = Number(inspection.quantity);
-  const isHundredPercent =
-    !!inspection.hundred_percent_inspection || (qty > 0 && planN >= qty);
+  const impliedHundredPercent = qty > 0 && planN >= qty;
   const onlyCheckColumns = points.length > 0 && points.every(isSpecless);
-  const summarizeChecks = isHundredPercent || (onlyCheckColumns && samples.length > SUMMARIZE_THRESHOLD);
+  // A machine log keeps every row (each has its own Qty/Machine #/Comment) --
+  // only an explicit 100% Inspection flag turns its checks into a tally.
+  const summarizeChecks = inspection.machine_log_mode
+    ? !!inspection.hundred_percent_inspection
+    : !!inspection.hundred_percent_inspection ||
+      ((impliedHundredPercent || onlyCheckColumns) && samples.length > SUMMARIZE_THRESHOLD);
   const summaryPoints = points.filter((p) => isSpecless(p) && (hasExplicitSummary(p) || summarizeChecks));
   const gridPoints = points.filter((p) => !summaryPoints.includes(p));
+  const hasAnySpec = gridPoints.some((p) => p.max_spec != null || p.min_spec != null || p.mean_value != null);
   const summaryRows = summaryPoints.map((point) => ({ point, ...summarizeCheckPoint(point, inspection) }));
   // The Reject Notes column is just a wall of "—" on a sheet where
   // everything passed -- only worth a column when at least one row actually
@@ -148,6 +160,37 @@ function DataSheetReport({ inspection }) {
           ),
         ].sort((a, b) => a - b);
 
+  // The header card's fields in reading order: who/what first (row 1), then
+  // the inspection's own numbers and sign-off (row 2) -- always exactly two
+  // rows on one shared column grid, so every label lines up under the one
+  // above it whatever the field count. Mirrors backend/src/pdf/
+  // inspectionSheet.js's getMetaFields.
+  const operationName = inspection.operation_name || inspection.operation;
+  const metaFields = [
+    ["Part #", inspection.part_number],
+    // Incoming Inspection's paper header tracks material FROM a supplier by
+    // their PO#/heat, not a customer/shop Job#-WO# -- same fields
+    // InspectionCapture.jsx's INCOMING_HEADER_FIELDS captures.
+    ...(inspection.type === "incoming"
+      ? [
+          ["Supplier", inspection.supplier || "—"],
+          ["PO#", inspection.po_number || "—"],
+          ["Heat #", inspection.heat || "—"],
+        ]
+      : [
+          ["Customer", inspection.customer || inspection.client_name],
+          ["Job# / WO#", inspection.job_number || "—"],
+        ]),
+    // Set-up / In-Process sheets are scoped to one operation on the part
+    // (e.g. "Bending") -- name it so the sheet says which step.
+    ...(operationName ? [["Operation", operationName]] : []),
+    ["Quantity", inspection.quantity ?? "—"],
+    ["Sampling Plan", inspection.sampling_plan_n ?? "—"],
+    ["Total Rejected", inspection.sampling_plan_c ?? "—"],
+    ["By", inspection.inspector || "—"],
+    ["Date", formatDate(inspection.date)],
+  ];
+
   return (
     <div className="sheet">
       <header className="report-header">
@@ -174,41 +217,24 @@ function DataSheetReport({ inspection }) {
         </div>
       </header>
 
-      <div className="report-meta-grid">
-        {[
-          ["Part #", inspection.part_number],
-          ["Quantity", inspection.quantity ?? "—"],
-          // Incoming Inspection's paper header tracks material FROM a
-          // supplier by their PO#/heat, not a customer/shop Job#-WO# --
-          // same fields InspectionCapture.jsx's INCOMING_HEADER_FIELDS
-          // captures, just laid out for print here.
-          ...(inspection.type === "incoming"
-            ? [
-                ["Supplier", inspection.supplier || "—"],
-                ["PO#", inspection.po_number || "—"],
-                ["Heat #", inspection.heat || "—"],
-              ]
-            : [
-                ["Customer", inspection.customer || inspection.client_name],
-                ["Job# / WO#", inspection.job_number || "—"],
-              ]),
-          ["Sampling Plan", inspection.sampling_plan_n ?? "—"],
-          ["Total Rejected", inspection.sampling_plan_c ?? "—"],
-          ["By", inspection.inspector || "—"],
-          ["Date", inspection.date ? inspection.date.slice(0, 10) : "—"],
-        ].map(([label, value]) => (
-          <div className="report-meta-item" key={label}>
-            <span className="report-meta-label">{label}</span>
-            <span className="report-meta-value">{value}</span>
-          </div>
-        ))}
+      <div className="report-meta-card">
+        <div className="report-meta-grid" style={{ "--meta-cols": Math.ceil(metaFields.length / 2) }}>
+          {metaFields.map(([label, value]) => (
+            <div className="report-meta-item" key={label}>
+              <span className="report-meta-label">{label}</span>
+              <span className="report-meta-value">{value}</span>
+            </div>
+          ))}
 
-        {result === "conditionally_approved" && (
-          <div className="report-meta-item report-meta-wide">
-            <span className="report-meta-label">Reason</span>
-            <span className="report-meta-value">{inspection.conditional_reason}</span>
-          </div>
-        )}
+          {result === "conditionally_approved" && (
+            <div className="report-meta-item report-meta-wide">
+              <span className="report-meta-label">Reason</span>
+              <span className="report-meta-value">{inspection.conditional_reason}</span>
+            </div>
+          )}
+        </div>
+        {/* Result gets its own panel on the right, divided off and centered,
+            so it reads as the sheet's verdict rather than one more field. */}
         <div className="report-meta-item report-meta-result">
           <span className="report-meta-label">Result</span>
           <span className={`result-badge result-badge-${result}`}>
@@ -273,45 +299,51 @@ function DataSheetReport({ inspection }) {
               </tr>
             </thead>
             <tbody>
-              <tr className="sheet-spec-row">
-                <td>Max. Spec.</td>
-                {machineLogMode && (
-                  <>
-                    <td></td>
-                    <td></td>
-                  </>
-                )}
-                {gridPoints.map((p) => (
-                  <td key={p.id}>{formatSpec(p.max_spec, p) ?? "—"}</td>
-                ))}
-                {machineLogMode && <td></td>}
-              </tr>
-              <tr className="sheet-spec-row">
-                <td>MEAN</td>
-                {machineLogMode && (
-                  <>
-                    <td></td>
-                    <td></td>
-                  </>
-                )}
-                {gridPoints.map((p) => (
-                  <td key={p.id}>{formatSpec(p.mean_value, p) ?? "—"}</td>
-                ))}
-                {machineLogMode && <td></td>}
-              </tr>
-              <tr className="sheet-spec-row sheet-spec-row-last">
-                <td>Min. Spec.</td>
-                {machineLogMode && (
-                  <>
-                    <td></td>
-                    <td></td>
-                  </>
-                )}
-                {gridPoints.map((p) => (
-                  <td key={p.id}>{formatSpec(p.min_spec, p) ?? "—"}</td>
-                ))}
-                {machineLogMode && <td></td>}
-              </tr>
+              {/* Same as InspectionCapture.jsx's hasAnySpec: no spec on any column
+                  (e.g. a Go/No-Go/Visual machine log) skips three empty rows. */}
+              {hasAnySpec && (
+                <>
+                  <tr className="sheet-spec-row">
+                    <td>Max. Spec.</td>
+                    {machineLogMode && (
+                      <>
+                        <td></td>
+                        <td></td>
+                      </>
+                    )}
+                    {gridPoints.map((p) => (
+                      <td key={p.id}>{formatSpec(p.max_spec, p) ?? "—"}</td>
+                    ))}
+                    {machineLogMode && <td></td>}
+                  </tr>
+                  <tr className="sheet-spec-row">
+                    <td>MEAN</td>
+                    {machineLogMode && (
+                      <>
+                        <td></td>
+                        <td></td>
+                      </>
+                    )}
+                    {gridPoints.map((p) => (
+                      <td key={p.id}>{formatSpec(p.mean_value, p) ?? "—"}</td>
+                    ))}
+                    {machineLogMode && <td></td>}
+                  </tr>
+                  <tr className="sheet-spec-row sheet-spec-row-last">
+                    <td>Min. Spec.</td>
+                    {machineLogMode && (
+                      <>
+                        <td></td>
+                        <td></td>
+                      </>
+                    )}
+                    {gridPoints.map((p) => (
+                      <td key={p.id}>{formatSpec(p.min_spec, p) ?? "—"}</td>
+                    ))}
+                    {machineLogMode && <td></td>}
+                  </tr>
+                </>
+              )}
               {gridSamples.map((s, i) => (
                 <tr key={s} className={i % 2 === 1 ? "sheet-row-alt" : ""}>
                   <td>{Number.isInteger(s) ? s : s.toFixed(1)}</td>
@@ -362,8 +394,11 @@ function DataSheetReport({ inspection }) {
           </span>
         </div>
         <div>
+          {/* The inspection date from the header, not the signing moment --
+              the exact e-signature timestamp stays in the sheet's History
+              (signatures table / audit log), never restated as another date. */}
           {signature ? (
-            <div className="signature-value">{formatDateTime(signature.signed_at)}</div>
+            <div className="signature-value">{formatDate(inspection.date)}</div>
           ) : (
             <div className="signature-line" />
           )}
@@ -400,8 +435,15 @@ export default function InspectionSheet() {
         <Link to={`/inspections/${inspectionId}`} state={location.state} className="back-link">
           ← Back to capture
         </Link>
-        <button onClick={() => window.open(`${BASE_URL}/inspections/${inspectionId}/pdf`, "_blank")}>
-          Print / Export PDF
+        <button
+          onClick={() =>
+            downloadInspectionPdf(inspectionId, inspectionPdfName(inspection)).catch((e) => setError(e.message))
+          }
+        >
+          Download PDF
+        </button>
+        <button type="button" className="secondary-btn" onClick={() => window.print()}>
+          Print
         </button>
       </div>
 
