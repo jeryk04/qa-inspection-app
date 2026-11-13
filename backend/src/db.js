@@ -7,7 +7,12 @@ const DB_PATH = path.join(__dirname, "..", "data.db");
 const SCHEMA_PATH = path.join(__dirname, "schema.sql");
 
 const db = new Database(DB_PATH);
-db.pragma("journal_mode = WAL");
+// The app runs from a network share (P: = \\gjdc\Public), and SQLite's WAL
+// mode needs shared memory on a local disk -- over SMB it can corrupt the
+// database. DELETE (a classic rollback journal) is the safer mode there.
+// A server with the database on its own local disk (e.g. the Ubuntu
+// deployment) can set SQLITE_JOURNAL_MODE=WAL in .env for better concurrency.
+db.pragma(`journal_mode = ${process.env.SQLITE_JOURNAL_MODE === "WAL" ? "WAL" : "DELETE"}`);
 db.pragma("foreign_keys = ON");
 
 // Creates the tables if they don't exist yet (idempotent, safe to run on every startup).
