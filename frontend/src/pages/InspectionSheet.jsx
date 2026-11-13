@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { Link, useLocation, useParams } from "react-router-dom";
 import { formatSpec } from "../lib/numeric";
-import { api, downloadInspectionPdf, inspectionPdfName } from "../api/client";
-import { resultStatus, resultLabel, formatDate } from "../lib/format";
+import { api, downloadInspectionPdf, downloadInspectionXlsx, inspectionPdfName } from "../api/client";
+import { resultStatus, resultLabel, formatDate, showsQuantity } from "../lib/format";
 import { isSpecless, summarizeCheckPoint } from "../lib/passfail";
 import logo from "../assets/logo.png";
 
@@ -85,7 +85,8 @@ function WarningIcon() {
 // One Data Sheet's full report body (header/meta/tables/notes/signature) --
 // used both for the sheet being viewed and, when it's a Final Inspection
 // that required one, the companion Operator In-Process Data Sheet bundled
-// in below it (see linkedInProcess in getInspectionDetail).
+// in below it, one per Operator operation (see linkedInProcesses in
+// getInspectionDetail).
 function DataSheetReport({ inspection }) {
   const points = inspection.points ?? [];
   const result = resultStatus(inspection);
@@ -168,6 +169,7 @@ function DataSheetReport({ inspection }) {
   const operationName = inspection.operation_name || inspection.operation;
   const metaFields = [
     ["Part #", inspection.part_number],
+    ["Rev", inspection.drawing_rev || "N/A"],
     // Incoming Inspection's paper header tracks material FROM a supplier by
     // their PO#/heat, not a customer/shop Job#-WO# -- same fields
     // InspectionCapture.jsx's INCOMING_HEADER_FIELDS captures.
@@ -184,7 +186,7 @@ function DataSheetReport({ inspection }) {
     // Set-up / In-Process sheets are scoped to one operation on the part
     // (e.g. "Bending") -- name it so the sheet says which step.
     ...(operationName ? [["Operation", operationName]] : []),
-    ["Quantity", inspection.quantity ?? "—"],
+    ...(showsQuantity(inspection) ? [["Quantity", inspection.quantity ?? "—"]] : []),
     ["Sampling Plan", inspection.sampling_plan_n ?? "—"],
     ["Total Rejected", inspection.sampling_plan_c ?? "—"],
     ["By", inspection.inspector || "—"],
@@ -427,7 +429,7 @@ export default function InspectionSheet() {
   if (error) return <p className="error">{error}</p>;
   if (!inspection) return <p>Loading...</p>;
 
-  const linked = inspection.linkedInProcess;
+  const linkedSheets = inspection.linkedInProcesses ?? [];
 
   return (
     <div className="page sheet-page">
@@ -442,6 +444,15 @@ export default function InspectionSheet() {
         >
           Download PDF
         </button>
+        <button
+          type="button"
+          className="secondary-btn"
+          onClick={() =>
+            downloadInspectionXlsx(inspectionId, inspectionPdfName(inspection)).catch((e) => setError(e.message))
+          }
+        >
+          Download Excel
+        </button>
         <button type="button" className="secondary-btn" onClick={() => window.print()}>
           Print
         </button>
@@ -449,16 +460,18 @@ export default function InspectionSheet() {
 
       <DataSheetReport inspection={inspection} />
 
-      {linked && (
-        <>
+      {linkedSheets.map((linked) => (
+        <Fragment key={linked.id}>
           <div className="sheet-linked-divider">
             <span>
-              Operator In-Process Data Sheet{linked.job_number ? ` — WO# ${linked.job_number}` : ""}
+              Operator In-Process Data Sheet
+              {linked.operation_name ? ` — ${linked.operation_name}` : ""}
+              {linked.job_number ? ` — WO# ${linked.job_number}` : ""}
             </span>
           </div>
           <DataSheetReport inspection={linked} />
-        </>
-      )}
+        </Fragment>
+      ))}
     </div>
   );
 }

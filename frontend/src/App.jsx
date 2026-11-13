@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route, Navigate, Link, useLocation, useNavigate 
 import { AuthProvider, useAuth } from "./context/AuthContext";
 import { ThemeProvider } from "./context/ThemeContext";
 import AccountMenu from "./components/AccountMenu";
+import InspectionReminders from "./components/InspectionReminders";
 import Home from "./pages/Home";
 import Login from "./pages/Login";
 import ChangePassword from "./pages/ChangePassword";
@@ -21,6 +22,11 @@ import IncomingInspection from "./pages/IncomingInspection";
 import IncomingFolders from "./pages/IncomingFolders";
 import AdminTrash from "./pages/AdminTrash";
 import AdminUsers from "./pages/AdminUsers";
+import InspectorPerformance from "./pages/InspectorPerformance";
+import InspectorDetail from "./pages/InspectorDetail";
+import PartSetup from "./pages/PartSetup";
+import Suppliers from "./pages/Suppliers";
+import { hasAnyRole } from "./lib/roles";
 import "./App.css";
 
 function RequireAuth({ children }) {
@@ -55,6 +61,15 @@ function RequireAdmin({ children }) {
   const { user, loading } = useAuth();
   if (loading) return null;
   if (user?.role !== "admin") return <Navigate to="/" replace />;
+  return children;
+}
+
+// Inspector Performance: QA Manager + admin only (mirrors the backend's
+// requireRole("qa_manager", "admin") on /api/inspector-analytics).
+function RequireQaManager({ children }) {
+  const { user, loading } = useAuth();
+  if (loading) return null;
+  if (!hasAnyRole(user, ["qa_manager", "admin"])) return <Navigate to="/" replace />;
   return children;
 }
 
@@ -94,6 +109,9 @@ function AppShell() {
           </nav>
         )}
       </header>
+      {/* In-Process re-inspection reminders -- on every page, for whoever
+          is signed in (see the component for which sheets count). */}
+      {user && !user.must_change_password && <InspectionReminders />}
       <main>
         <Routes>
           <Route path="/login" element={<Login />} />
@@ -142,6 +160,22 @@ function AppShell() {
             element={
               <RequireAuth>
                 <Inspections />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/suppliers"
+            element={
+              <RequireAuth>
+                <Suppliers />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/parts/:partId/setup"
+            element={
+              <RequireAuth>
+                <PartSetup />
               </RequireAuth>
             }
           />
@@ -242,6 +276,26 @@ function AppShell() {
                 <RequireAdmin>
                   <AdminUsers />
                 </RequireAdmin>
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/team-performance"
+            element={
+              <RequireAuth>
+                <RequireQaManager>
+                  <InspectorPerformance />
+                </RequireQaManager>
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/team-performance/:userId"
+            element={
+              <RequireAuth>
+                <RequireQaManager>
+                  <InspectorDetail />
+                </RequireQaManager>
               </RequireAuth>
             }
           />

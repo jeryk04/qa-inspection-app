@@ -2,8 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
 import { useAuth } from "../context/AuthContext";
+import { hasAnyRole } from "../lib/roles";
 import { handleGridArrowNav } from "../lib/gridNav";
 import { isParenthesized, toStoredNumber } from "../lib/numeric";
+import { formatMinutes } from "../lib/reminders";
 import DecimalCell from "../components/DecimalCell";
 import PageNav from "../components/PageNav";
 import { useConfirm } from "../hooks/useConfirm";
@@ -28,7 +30,7 @@ const EMPTY_SPEC = {
 // change. Operators still see every spec read-only on the Data Sheet's own
 // Measurements grid, so there's no read-only mode to build here -- they
 // just never need this page.
-const TEMPLATE_EDIT_ROLES = ["qc", "admin", "engineer", "supervisor"];
+const TEMPLATE_EDIT_ROLES = ["qc", "admin", "engineer", "supervisor", "qa_manager"];
 
 function isPdf(path) {
   return path?.toLowerCase().endsWith(".pdf");
@@ -42,7 +44,7 @@ function isPdf(path) {
 export default function DataSheetTemplate() {
   const { partId } = useParams();
   const { user } = useAuth();
-  const canEdit = TEMPLATE_EDIT_ROLES.includes(user?.role);
+  const canEdit = hasAnyRole(user, TEMPLATE_EDIT_ROLES);
   const [searchParams] = useSearchParams();
   // Present only when reached from OperationDetail -- switches every drawing
   // fetch/create below from the part's Final bucket to this operation's
@@ -78,9 +80,20 @@ export default function DataSheetTemplate() {
   // plan, for a periodic check that rotates through several machines.
   const [machineLogMode, setMachineLogMode] = useState(false);
   const [savingMachineLogMode, setSavingMachineLogMode] = useState(false);
+  // In-Process re-inspection reminder: "every N minutes/hours" while a Data
+  // Sheet for this operation is in progress. Blank = off. Edited as a value
+  // + unit, stored as whole minutes.
+  const [reminderValue, setReminderValue] = useState("");
+  const [reminderUnit, setReminderUnit] = useState("hours");
+  const [savingReminder, setSavingReminder] = useState(false);
 
   const [specEdits, setSpecEdits] = useState({}); // pointId -> { balloon_number, max_spec, min_spec, mean_value, is_check_column }
   const [newColumns, setNewColumns] = useState([]); // [{ id: <temp negative id> }, ...] — not yet persisted
+  // Column order as rearranged on screen (saved + draft ids), persisted on
+  // Save Template. Any column not listed yet (just added) goes at the end.
+  const [columnOrder, setColumnOrder] = useState([]);
+  const [dragId, setDragId] = useState(null);
+  const [dropTarget, setDropTarget] = useState(null); // { id, side: "before" | "after" }
   const [saving, setSaving] = useState(false);
   const [pointMenu, setPointMenu] = useState(null); // { pointId, x, y }
   // Right-click a Find# column -> "Format decimals..." -- an Excel-style
@@ -166,7 +179,9 @@ export default function DataSheetTemplate() {
         setRevisionEdit(d.revision_label ?? "");
         setHundredPercent(!!d.hundred_percent_inspection);
         setMachineLogMode(!!d.machine_log_mode);
+        applyReminderState(d.reinspect_interval_minutes);
         setNewColumns([]);
+        setColumnOrder(d.points.map((p) => p.id));
         const specState = {};
         d.points.forEach((p) => {
           // Reference dimensions come back as plain numbers + is_reference;
@@ -288,6 +303,40 @@ export default function DataSheetTemplate() {
     }
   };
 
+  // Shows a whole number of hours as hours, anything else as minutes.
+  const applyReminderState = (minutes) => {
+    if (!minutes) {
+      setReminderValue("");
+      setReminderUnit("hours");
+    } else if (minutes % 60 === 0) {
+      setReminderValue(String(minutes / 60));
+      setReminderUnit("hours");
+    } else {
+      setReminderValue(String(minutes));
+      setReminderUnit("minutes");
+    }
+  };
+
+  const handleSaveReminder = async (value = reminderValue) => {
+    const trimmed = String(value).trim();
+    const minutes = trimmed === "" ? null : Math.round(Number(trimmed) * (reminderUnit === "hours" ? 60 : 1));
+    if (minutes !== null && !(minutes >= 1)) {
+      setError("Enter how often this operation must be re-inspected, e.g. 2 hours or 30 minutes.");
+      return;
+    }
+    setSavingReminder(true);
+    setError(null);
+    try {
+      const updated = await api.updateDrawing(drawing.id, { reinspect_interval_minutes: minutes });
+      setDrawing(updated);
+      applyReminderState(updated.reinspect_interval_minutes);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSavingReminder(false);
+    }
+  };
+
   const handleSpecChange = (pointId, field, value) => {
     setSpecEdits((prev) => ({ ...prev, [pointId]: { ...prev[pointId], [field]: value } }));
   };
@@ -314,6 +363,35 @@ export default function DataSheetTemplate() {
     setPointMenu({ pointId, x: e.clientX, y: e.clientY });
   };
 
+  // Moves a column to `index` in the on-screen order (index counted with the
+  // moved column already taken out). Saved by Save Template.
+  const moveColumn = (pointId, index) => {
+    setPointMenu(null);
+    const ids = allColumns.map((c) => c.id).filter((id) => id !== pointId);
+    ids.splice(Math.max(0, Math.min(index, ids.length)), 0, pointId);
+    setColumnOrder(ids);
+  };
+
+  const columnIndex = (pointId) => allColumns.findIndex((c) => c.id === pointId);
+
+  const handleDragOver = (e, pointId) => {
+    if (dragId == null) return;
+    e.preventDefault();
+    const rect = e.currentTarget.getBoundingClientRect();
+    const side = e.clientX < rect.left + rect.width / 2 ? "before" : "after";
+    if (dropTarget?.id !== pointId || dropTarget?.side !== side) setDropTarget({ id: pointId, side });
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    if (dragId != null && dropTarget && dropTarget.id !== dragId) {
+      const ids = allColumns.map((c) => c.id).filter((id) => id !== dragId);
+      moveColumn(dragId, ids.indexOf(dropTarget.id) + (dropTarget.side === "after" ? 1 : 0));
+    }
+    setDragId(null);
+    setDropTarget(null);
+  };
+
   const openFormatDecimals = (pointId) => {
     setPointMenu(null);
     setDecimalsInput(specEdits[pointId]?.decimal_places ?? "3");
@@ -337,7 +415,12 @@ export default function DataSheetTemplate() {
       });
       return;
     }
-    if (!(await confirm("Delete this Find# column? This can't be undone."))) return;
+    if (
+      !(await confirm(
+        "Delete this Find# column? It's removed from this template and from new inspections. Past inspections that already recorded it keep it. This can't be undone."
+      ))
+    )
+      return;
     try {
       await api.deletePoint(pointId);
       const refreshed = await api.getDrawing(drawing.id);
@@ -377,11 +460,12 @@ export default function DataSheetTemplate() {
     setSaving(true);
     setError(null);
     try {
+      const createdIds = {}; // draft temp id -> real id
       for (const col of newColumns) {
         const edit = specEdits[col.id];
         const label = edit?.balloon_number?.trim();
         if (!label) continue;
-        await api.addPoint(drawing.id, {
+        const created = await api.addPoint(drawing.id, {
           balloon_number: label,
           max_spec: toStoredNumber(edit.max_spec),
           min_spec: toStoredNumber(edit.min_spec),
@@ -390,6 +474,7 @@ export default function DataSheetTemplate() {
           is_check_column: edit.is_check_column,
           is_reference: isReferenceEdit(edit),
         });
+        createdIds[col.id] = created.id;
       }
 
       await Promise.all(
@@ -408,9 +493,14 @@ export default function DataSheetTemplate() {
         })
       );
 
+      // Blank drafts were skipped above, so they drop out of the order here.
+      const finalOrder = allColumns.map((c) => createdIds[c.id] ?? c.id).filter((id) => id > 0);
+      if (finalOrder.length > 0) await api.reorderPoints(drawing.id, finalOrder);
+
       setNewColumns([]);
       const refreshed = await api.getDrawing(drawing.id);
       setDrawing(refreshed);
+      setColumnOrder(refreshed.points.map((p) => p.id));
     } catch (e) {
       setError(e.message);
     } finally {
@@ -419,7 +509,11 @@ export default function DataSheetTemplate() {
   };
 
   const fileUrl = drawing ? `${API_ORIGIN}${drawing.image_path}` : null;
-  const allColumns = drawing ? [...drawing.points, ...newColumns] : [];
+  const columnsById = new Map((drawing ? [...drawing.points, ...newColumns] : []).map((c) => [c.id, c]));
+  const allColumns = [
+    ...columnOrder.filter((id) => columnsById.has(id)).map((id) => columnsById.get(id)),
+    ...[...columnsById.values()].filter((c) => !columnOrder.includes(c.id)),
+  ];
   const backTo = operationId
     ? `/parts/${partId}/operations/${operationId}?type=${type}`
     : `/parts/${partId}/inspections${type !== "final" ? `?type=${type}` : ""}`;
@@ -427,7 +521,11 @@ export default function DataSheetTemplate() {
   // The "Part" breadcrumb segment is one level above backTo when there's an
   // operation involved (backTo goes straight to this one operation, but the
   // Part level should go to the Operations list, same as OperationDetail.jsx).
-  const partLevelHref = operationId ? `/parts/${partId}/operations?type=${type}` : backTo;
+  // (Keeping an Operator In-Process operation on that list -- see
+  // OperationsList.jsx's ?scope=.)
+  const partLevelHref = operationId
+    ? `/parts/${partId}/operations?type=${type}${operation?.scope === "in_process_operator" ? "&scope=in_process_operator" : ""}`
+    : backTo;
 
   return (
     <div className="page">
@@ -515,6 +613,52 @@ export default function DataSheetTemplate() {
               </label>
             )}
 
+            {type === "in_process" && (
+              <div className="inline-form reinspect-reminder">
+                <label>
+                  Re-inspection reminder: every{" "}
+                  <input
+                    className="spec-input"
+                    type="number"
+                    min="1"
+                    step="any"
+                    value={reminderValue}
+                    onChange={(e) => setReminderValue(e.target.value)}
+                    placeholder="off"
+                    aria-label="Re-inspection interval"
+                  />
+                </label>
+                <select
+                  value={reminderUnit}
+                  onChange={(e) => setReminderUnit(e.target.value)}
+                  aria-label="Re-inspection interval unit"
+                >
+                  <option value="hours">hours</option>
+                  <option value="minutes">minutes</option>
+                </select>
+                <button type="button" onClick={() => handleSaveReminder()} disabled={savingReminder}>
+                  Save reminder
+                </button>
+                {drawing.reinspect_interval_minutes && (
+                  <button
+                    type="button"
+                    onClick={() => handleSaveReminder("")}
+                    disabled={savingReminder}
+                    className="secondary-btn"
+                  >
+                    Turn off
+                  </button>
+                )}
+                <span className="muted reinspect-reminder-hint">
+                  {drawing.reinspect_interval_minutes
+                    ? `On — every ${formatMinutes(drawing.reinspect_interval_minutes)}. `
+                    : "Off. "}
+                  Only runs while a Data Sheet for this operation is In Progress; the clock restarts each time
+                  readings are saved.
+                </span>
+              </div>
+            )}
+
             {drawing.image_path ? (
               <div className="actions-row">
                 <button type="button" onClick={() => window.open(fileUrl, "_blank", "noopener,noreferrer")}>
@@ -537,14 +681,42 @@ export default function DataSheetTemplate() {
       {drawing && (
         <section className="card template-section">
           <h2>Find# Columns ({drawing.points.length})</h2>
-          <p className="muted">Right-click a Find# column to delete it or set its decimal places.</p>
+          <p className="muted">
+            Drag a Find# column by its ⠿ handle to reorder it. Right-click a Find# column to move or delete it, or
+            to set its decimal places.
+          </p>
           <div className="table-scroll">
             <table className="capture-table capture-table-transposed">
               <thead>
                 <tr>
                   <th>Find #</th>
                   {allColumns.map((p) => (
-                    <th key={p.id} onContextMenu={(e) => handlePointContextMenu(e, p.id)}>
+                    <th
+                      key={p.id}
+                      onContextMenu={(e) => handlePointContextMenu(e, p.id)}
+                      onDragOver={(e) => handleDragOver(e, p.id)}
+                      onDrop={handleDrop}
+                      className={[
+                        dragId === p.id ? "col-dragging" : "",
+                        dropTarget?.id === p.id && dropTarget.id !== dragId ? `drop-${dropTarget.side}` : "",
+                      ].join(" ")}
+                    >
+                      <span
+                        className="col-drag-handle"
+                        draggable
+                        title="Drag to move this Find# column"
+                        onDragStart={(e) => {
+                          e.dataTransfer.effectAllowed = "move";
+                          e.dataTransfer.setData("text/plain", String(p.id)); // Firefox won't start a drag without data
+                          setDragId(p.id);
+                        }}
+                        onDragEnd={() => {
+                          setDragId(null);
+                          setDropTarget(null);
+                        }}
+                      >
+                        ⠿
+                      </span>
                       <input
                         className="spec-input"
                         value={specEdits[p.id]?.balloon_number ?? ""}
@@ -624,6 +796,18 @@ export default function DataSheetTemplate() {
 
       {pointMenu && (
         <ul className="context-menu" style={{ top: pointMenu.y, left: pointMenu.x }}>
+          {columnIndex(pointMenu.pointId) > 0 && (
+            <>
+              <li onClick={() => moveColumn(pointMenu.pointId, 0)}>Move to start</li>
+              <li onClick={() => moveColumn(pointMenu.pointId, columnIndex(pointMenu.pointId) - 1)}>Move left</li>
+            </>
+          )}
+          {columnIndex(pointMenu.pointId) < allColumns.length - 1 && (
+            <>
+              <li onClick={() => moveColumn(pointMenu.pointId, columnIndex(pointMenu.pointId) + 1)}>Move right</li>
+              <li onClick={() => moveColumn(pointMenu.pointId, allColumns.length)}>Move to end</li>
+            </>
+          )}
           <li onClick={() => openFormatDecimals(pointMenu.pointId)}>Format decimals…</li>
           <li className="context-menu-danger" onClick={() => handleDeletePoint(pointMenu.pointId)}>
             Delete

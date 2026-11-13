@@ -23,28 +23,37 @@ async function request(path, options = {}) {
   return res.json();
 }
 
-// Saves a Data Sheet PDF straight to the user's Downloads. Fetched here (with
-// the session cookie) and handed to the browser as an in-memory blob, rather
-// than linking to the API URL -- with the dev/LAN self-signed certificate,
-// Edge's "Save" re-downloads that URL itself and fails with "Network issue".
-export async function downloadInspectionPdf(inspectionId, filename) {
-  const res = await fetch(`${BASE_URL}/inspections/${inspectionId}/pdf`, { credentials: "include" });
+// Saves a Data Sheet export straight to the user's Downloads. Fetched here
+// (with the session cookie) and handed to the browser as an in-memory blob,
+// rather than linking to the API URL -- with the dev/LAN self-signed
+// certificate, Edge's "Save" re-downloads that URL itself and fails with
+// "Network issue". `ext` is both the API route and the file extension.
+async function downloadInspectionFile(inspectionId, filename, ext, failMessage) {
+  const res = await fetch(`${BASE_URL}/inspections/${inspectionId}/${ext}`, { credentials: "include" });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(err.error || "Couldn't generate the PDF");
+    throw new Error(err.error || failMessage);
   }
   const url = URL.createObjectURL(await res.blob());
   const a = document.createElement("a");
   a.href = url;
-  a.download = `${(filename || `inspection-${inspectionId}`).replace(/[\\/:*?"<>|]+/g, "-").trim()}.pdf`;
+  a.download = `${(filename || `inspection-${inspectionId}`).replace(/[\\/:*?"<>|]+/g, "-").trim()}.${ext}`;
   document.body.appendChild(a);
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
+export function downloadInspectionPdf(inspectionId, filename) {
+  return downloadInspectionFile(inspectionId, filename, "pdf", "Couldn't generate the PDF");
+}
+
+export function downloadInspectionXlsx(inspectionId, filename) {
+  return downloadInspectionFile(inspectionId, filename, "xlsx", "Couldn't generate the Excel file");
+}
+
 // "918-1811-02 Final WO 9777 2026-09-21" (or "... Incoming PO 96664 ...") --
-// what a saved PDF is named. "#" is dropped since it reads oddly in a file name.
+// what a saved PDF / Excel file is named. "#" is dropped since it reads oddly in a file name.
 export function inspectionPdfName(inspection) {
   return [
     inspection.part_number,
@@ -87,6 +96,10 @@ export const api = {
   updateOperation: (partId, id, data) =>
     request(`/parts/${partId}/operations/${id}`, { method: "PUT", body: JSON.stringify(data) }),
   deleteOperation: (partId, id) => request(`/parts/${partId}/operations/${id}`, { method: "DELETE" }),
+  // Template/drawing setup per inspection type (Browse Customers)
+  getPartsSetupStatus: (clientId) => request(`/parts/setup-status?client_id=${clientId}`),
+  getPartSetupStatus: (partId) => request(`/parts/${partId}/setup-status`),
+  getSetupSummary: (clientIds) => request(`/parts/setup-summary?client_ids=${clientIds.join(",")}`),
 
   // Balloon Drawings
   getDrawings: (partId) => request(`/drawings?part_id=${partId}`),
@@ -101,6 +114,8 @@ export const api = {
   updatePoint: (pointId, data) =>
     request(`/drawings/points/${pointId}`, { method: "PUT", body: JSON.stringify(data) }),
   deletePoint: (pointId) => request(`/drawings/points/${pointId}`, { method: "DELETE" }),
+  reorderPoints: (drawingId, pointIds) =>
+    request(`/drawings/${drawingId}/points/order`, { method: "PUT", body: JSON.stringify({ point_ids: pointIds }) }),
 
   // Inspections
   getInspections: (params = {}) => {
@@ -108,6 +123,7 @@ export const api = {
     return request(`/inspections${qs ? `?${qs}` : ""}`);
   },
   getInspection: (id) => request(`/inspections/${id}`),
+  getInspectionReminders: () => request("/inspections/reminders"),
   createInspection: (data) => request("/inspections", { method: "POST", body: JSON.stringify(data) }),
   updateInspection: (id, data) => request(`/inspections/${id}`, { method: "PUT", body: JSON.stringify(data) }),
   deleteInspection: (id) => request(`/inspections/${id}`, { method: "DELETE" }),
@@ -166,6 +182,18 @@ export const api = {
   getTrash: () => request("/admin/trash"),
   restoreTrash: (id) => request(`/admin/trash/${id}/restore`, { method: "POST" }),
   purgeTrash: (id) => request(`/admin/trash/${id}`, { method: "DELETE" }),
+
+  // QA Manager (+ admin): Inspector Performance
+  getInspectorAnalytics: (params = {}) => {
+    const clean = Object.fromEntries(Object.entries(params).filter(([, v]) => v !== "" && v != null));
+    const qs = new URLSearchParams(clean).toString();
+    return request(`/inspector-analytics${qs ? `?${qs}` : ""}`);
+  },
+  getInspectorDetail: (userId, params = {}) => {
+    const clean = Object.fromEntries(Object.entries(params).filter(([, v]) => v !== "" && v != null));
+    const qs = new URLSearchParams(clean).toString();
+    return request(`/inspector-analytics/${userId}${qs ? `?${qs}` : ""}`);
+  },
 
   // Admin: users
   getUsers: () => request("/admin/users"),

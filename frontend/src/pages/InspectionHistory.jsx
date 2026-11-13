@@ -2,19 +2,20 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api } from "../api/client";
 import { useAuth } from "../context/AuthContext";
+import { hasAnyRole } from "../lib/roles";
 import { useConfirm } from "../hooks/useConfirm";
 import PageNav from "../components/PageNav";
 import { resultStatus, resultLabel, formatDate, orderRefLabel } from "../lib/format";
 
 // Matches backend/src/routes/inspections.js's requireRole("admin",
-// "supervisor") on both DELETE /:id and PUT /:id/unlock, and the same list
+// "supervisor", "qa_manager") on both DELETE /:id and PUT /:id/unlock, and the same list
 // in Inspections.jsx/OperationDetail.jsx's own guards for the same actions.
-const CAN_MANAGE_ROLES = ["admin", "supervisor"];
+const CAN_MANAGE_ROLES = ["admin", "supervisor", "qa_manager"];
 
 export default function InspectionHistory() {
   const navigate = useNavigate();
   const { user } = useAuth();
-  const canManage = CAN_MANAGE_ROLES.includes(user?.role);
+  const canManage = hasAnyRole(user, CAN_MANAGE_ROLES);
   const [contextMenu, setContextMenu] = useState(null); // { inspection, x, y }
   const [confirm, confirmDialog] = useConfirm();
   const [clients, setClients] = useState([]);
@@ -81,7 +82,7 @@ export default function InspectionHistory() {
 
   const handleDelete = async (inspection) => {
     setContextMenu(null);
-    if (!(await confirm("Are you sure you want to delete this inspection?"))) return;
+    if (!(await confirm("Delete this inspection? An admin can restore it from Recently Deleted if needed."))) return;
     try {
       await api.deleteInspection(inspection.id);
       search();
@@ -196,7 +197,7 @@ export default function InspectionHistory() {
                 <td>{orderRefLabel(i) ?? "—"}</td>
                 <td>{i.type}</td>
                 <td>{formatDate(i.date)}</td>
-                <td>{i.created_by_name || "—"}</td>
+                <td>{i.performed_by_name || i.created_by_name || "—"}</td>
                 <td>
                   <span className={`status status-${resultStatus(i)}`}>{resultLabel(resultStatus(i))}</span>
                 </td>

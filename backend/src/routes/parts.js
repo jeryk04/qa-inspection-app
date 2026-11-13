@@ -4,6 +4,7 @@ const attachRole = require("../middleware/attachRole");
 const requireRole = require("../middleware/requireRole");
 const { archiveOperation } = require("../lib/trash");
 const { isAssignedToClient } = require("../lib/operatorAccess");
+const { partSetupStatus } = require("../lib/partSetup");
 
 const router = express.Router();
 
@@ -34,6 +35,56 @@ router.get("/", attachRole, (req, res) => {
   res.json(parts);
 });
 
+// GET /api/parts/setup-status?client_id=1 -- every part of one customer's
+// template/drawing setup per inspection type (see lib/partSetup.js), keyed
+// by part id, for Browse Customers' parts list.
+router.get("/setup-status", attachRole, (req, res) => {
+  const clientId = Number(req.query.client_id);
+  if (!Number.isInteger(clientId)) return res.status(400).json({ error: "client_id is required" });
+  if (req.user.role === "operator" && !isAssignedToClient(req.user.id, clientId)) {
+    return res.status(403).json({ error: "You're not assigned to this customer." });
+  }
+  const partIds = db.prepare("SELECT id FROM parts WHERE client_id = ?").all(clientId).map((p) => p.id);
+  res.json(Object.fromEntries(partSetupStatus(partIds)));
+});
+
+// GET /api/parts/setup-summary?client_ids=1,2,3 -- per customer/supplier
+// folder: how many parts, how many have the Final/Incoming template set up,
+// and how many have its drawing attached (Browse Suppliers' list).
+router.get("/setup-summary", attachRole, (req, res) => {
+  const clientIds = String(req.query.client_ids || "")
+    .split(",")
+    .map(Number)
+    .filter(Number.isInteger)
+    .filter((id) => req.user.role !== "operator" || isAssignedToClient(req.user.id, id));
+  const parts = clientIds.length
+    ? db.prepare("SELECT id, client_id FROM parts WHERE client_id IN (SELECT value FROM json_each(?))").all(JSON.stringify(clientIds))
+    : [];
+  const status = partSetupStatus(parts.map((p) => p.id));
+  const summary = Object.fromEntries(clientIds.map((id) => [id, { parts: 0, templates: 0, drawings: 0 }]));
+  for (const p of parts) {
+    const s = summary[p.client_id];
+    const final = status.get(p.id).final;
+    s.parts += 1;
+    if (final.template) s.templates += 1;
+    if (final.drawing) s.drawings += 1;
+  }
+  res.json(summary);
+});
+
+// GET /api/parts/:id/setup-status -- one part's setup per inspection type,
+// with each operation listed (Browse Customers' part setup page).
+router.get("/:id/setup-status", attachRole, (req, res) => {
+  const part = db
+    .prepare("SELECT p.*, c.name AS client_name FROM parts p JOIN clients c ON c.id = p.client_id WHERE p.id = ?")
+    .get(req.params.id);
+  if (!part) return res.status(404).json({ error: "Part not found" });
+  if (req.user.role === "operator" && !isAssignedToClient(req.user.id, part.client_id)) {
+    return res.status(403).json({ error: "You're not assigned to this customer." });
+  }
+  res.json({ part, status: partSetupStatus([part.id]).get(part.id) });
+});
+
 // GET /api/parts/:id
 router.get("/:id", attachRole, (req, res) => {
   const part = db.prepare("SELECT * FROM parts WHERE id = ?").get(req.params.id);
@@ -49,7 +100,7 @@ router.get("/:id", attachRole, (req, res) => {
 // this is still the real enforcement, that's just UI. Previously had no
 // role check at all (an Operator, if they reached Parts.jsx, could create
 // one) -- now matches clients.js's POST /.
-router.post("/", attachRole, requireRole("qc", "admin", "engineer", "supervisor"), (req, res) => {
+router.post("/", attachRole, requireRole("qc", "admin", "engineer", "supervisor", "qa_manager"), (req, res) => {
   const { client_id, part_number, description } = req.body;
   if (!client_id || !part_number) {
     return res.status(400).json({ error: "client_id and part_number are required" });
@@ -91,7 +142,7 @@ router.put("/:id", (req, res) => {
 
 // DELETE /api/parts/:id  (cascades to its drawings/inspections; blocked if any
 // inspection already has recorded measurements, to protect quality records)
-router.delete("/:id", attachRole, requireRole("qc", "admin", "supervisor"), (req, res) => {
+router.delete("/:id", attachRole, requireRole("qc", "admin", "supervisor", "qa_manager"), (req, res) => {
   try {
     const result = db.prepare("DELETE FROM parts WHERE id = ?").run(req.params.id);
     if (result.changes === 0) return res.status(404).json({ error: "Part not found" });
@@ -133,7 +184,7 @@ const VALID_OPERATION_SCOPES = ["setup", "in_process_operator", "in_process_qc",
 // create. scope is required (not defaulted) so every caller has to say
 // which of the three independent lists it's creating into (see schema.sql's
 // operations.scope comment).
-router.post("/:partId/operations", attachRole, requireRole("qc", "admin", "engineer", "supervisor"), (req, res) => {
+router.post("/:partId/operations", attachRole, requireRole("qc", "admin", "engineer", "supervisor", "qa_manager"), (req, res) => {
   const name = req.body.name?.trim();
   const { scope } = req.body;
   if (!name) return res.status(400).json({ error: "name is required" });
@@ -157,7 +208,7 @@ router.post("/:partId/operations", attachRole, requireRole("qc", "admin", "engin
 
 // PUT /api/parts/:partId/operations/:id  (rename; body: { name }) -- same
 // roles as create.
-router.put("/:partId/operations/:id", attachRole, requireRole("qc", "admin", "engineer", "supervisor"), (req, res) => {
+router.put("/:partId/operations/:id", attachRole, requireRole("qc", "admin", "engineer", "supervisor", "qa_manager"), (req, res) => {
   const name = req.body.name?.trim();
   if (!name) return res.status(400).json({ error: "name is required" });
 
@@ -184,7 +235,7 @@ router.put("/:partId/operations/:id", attachRole, requireRole("qc", "admin", "en
 // history) is snapshotted into the admin recycle bin (see lib/trash.js)
 // and then cascaded away manually, in dependency order, inside one
 // transaction so the archive and the removal are atomic.
-router.delete("/:partId/operations/:id", attachRole, requireRole("qc", "admin", "supervisor"), (req, res) => {
+router.delete("/:partId/operations/:id", attachRole, requireRole("qc", "admin", "supervisor", "qa_manager"), (req, res) => {
   const operation = db
     .prepare("SELECT * FROM operations WHERE id = ? AND part_id = ?")
     .get(req.params.id, req.params.partId);

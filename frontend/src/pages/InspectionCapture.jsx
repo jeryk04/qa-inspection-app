@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
-import { api, downloadInspectionPdf, inspectionPdfName } from "../api/client";
+import { api, downloadInspectionPdf, downloadInspectionXlsx, inspectionPdfName } from "../api/client";
 import { useAuth } from "../context/AuthContext";
+import { hasAnyRole } from "../lib/roles";
 import { formatSpec, toStoredNumber } from "../lib/numeric";
-import { resultLabel, resultStatus, timeAgo } from "../lib/format";
+import { resultLabel, resultStatus, showsQuantity, timeAgo } from "../lib/format";
 import { formatPassFail, isSpecless, parsePassFail, summarizeCheckPoint } from "../lib/passfail";
+import { formatMinutes, reminderDueAt } from "../lib/reminders";
 import DecimalCell from "../components/DecimalCell";
 import PassFailCell from "../components/PassFailCell";
 import PageNav from "../components/PageNav";
@@ -55,10 +57,16 @@ const INCOMING_HEADER_FIELDS = [
 // the matching hasQualifyingInProcess check on PUT /:id/status.
 const FINAL_HEADER_FIELDS = [...HEADER_FIELDS, ["requires_in_process", "Operator In-Process Data Sheet required"]];
 
-function headerFieldsFor(type) {
-  if (type === "incoming") return INCOMING_HEADER_FIELDS;
-  if (type === "final") return FINAL_HEADER_FIELDS;
-  return HEADER_FIELDS;
+// QC's Set-up / In-Process sheets drop Quantity -- see lib/format.js's
+// showsQuantity.
+function headerFieldsFor(inspection) {
+  if (inspection.type === "incoming") return INCOMING_HEADER_FIELDS;
+  if (inspection.type === "final") return FINAL_HEADER_FIELDS;
+  return showsQuantity(inspection) ? HEADER_FIELDS : HEADER_FIELDS.filter(([field]) => field !== "quantity");
+}
+
+function hasPerOperationRequirement(inspection) {
+  return inspection.type === "final" && (inspection.operator_operations?.length ?? 0) > 1;
 }
 
 // Header fields that render as a checkbox and are stored as a 0/1 column on
@@ -168,6 +176,7 @@ export default function InspectionCapture() {
   const [signing, setSigning] = useState(false);
   const [unlocking, setUnlocking] = useState(false);
   const [exportingPdf, setExportingPdf] = useState(false);
+  const [exportingXlsx, setExportingXlsx] = useState(false);
   const [sampleMenu, setSampleMenu] = useState(null); // { sampleNumber, x, y }
   const [confirm, confirmDialog] = useConfirm();
   // Optional supporting photos -- Final Inspection only (see the Photos
@@ -182,6 +191,18 @@ export default function InspectionCapture() {
   const [certError, setCertError] = useState(null);
 
   const isLocked = inspection ? inspection.status !== "in_progress" : false;
+  // In-Process re-inspection reminder countdown (see lib/reminders.js) --
+  // last_reading_at stays current because every save re-fetches the
+  // inspection (refreshInspection below).
+  const reminderDue =
+    inspection && !isLocked ? reminderDueAt(inspection.reinspect_interval_minutes, inspection.last_reading_at) : null;
+  const [reminderNow, setReminderNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (reminderDue == null) return;
+    setReminderNow(Date.now());
+    const tick = setInterval(() => setReminderNow(Date.now()), 15_000);
+    return () => clearInterval(tick);
+  }, [reminderDue]);
   const hasTemplate = drawing ? drawing.points.length > 0 : false;
   // Hides the Max/MEAN/Min spec rows entirely when nothing on this sheet has
   // a spec value recorded (e.g. a Fixture-only Data Sheet) -- otherwise
@@ -218,20 +239,21 @@ export default function InspectionCapture() {
   // sign anything; an operator signs only their own Operator In-Process
   // sheets. Hidden otherwise so nobody goes through the whole "type your
   // name to sign" flow only to hit a 403 at the end.
+  // Checked against every role the user holds (lib/roles.js).
   const canSign =
-    ["qc", "admin", "supervisor"].includes(user?.role) ||
-    (user?.role === "operator" &&
+    hasAnyRole(user, ["qc", "admin", "supervisor", "qa_manager"]) ||
+    (hasAnyRole(user, ["operator"]) &&
       inspection?.type === "in_process" &&
       inspection?.operation_scope === "in_process_operator");
   // Matches DataSheetTemplate.jsx's own guard and the requireRole("qc",
-  // "admin", "engineer", "supervisor") now on every write route in
+  // "admin", "engineer", "supervisor", "qa_manager") now on every write route in
   // backend/src/routes/drawings.js.
-  const canEditTemplate = ["qc", "admin", "engineer", "supervisor"].includes(user?.role);
-  // Matches the server-side requireRole("admin", "supervisor") guard on PUT
+  const canEditTemplate = hasAnyRole(user, ["qc", "admin", "engineer", "supervisor", "qa_manager"]);
+  // Matches the server-side requireRole("admin", "supervisor", "qa_manager") guard on PUT
   // /:id/unlock -- same roles as DELETE /:id (InspectionHistory.jsx), since
   // this is the non-destructive alternative to deleting a signed sheet that
   // turns out to need a correction.
-  const canUnlock = ["admin", "supervisor"].includes(user?.role);
+  const canUnlock = hasAnyRole(user, ["admin", "supervisor", "qa_manager"]);
 
   // Snapshots of what's actually been saved, so the beforeunload guard below
   // (and the autosave effects) can tell "typed but not saved" apart from
@@ -244,7 +266,7 @@ export default function InspectionCapture() {
 
   const applyHeaderState = (insp) => {
     const headerState = {};
-    headerFieldsFor(insp.type).forEach(([field]) => {
+    headerFieldsFor(insp).forEach(([field]) => {
       if (field === "date") {
         // "date" is stored as a full timestamp on older records — the date
         // input only accepts a plain YYYY-MM-DD value.
@@ -260,6 +282,10 @@ export default function InspectionCapture() {
         headerState[field] = insp[field] ?? "";
       }
     });
+    // A Final on a part with more than one Operator operation picks which
+    // ones it requires (one checkbox each) instead of the single checkbox --
+    // see requiredOperations in backend/src/routes/inspections.js.
+    if (hasPerOperationRequirement(insp)) headerState.required_operation_ids = insp.required_operation_ids ?? [];
     setHeader(headerState);
     savedHeaderRef.current = JSON.stringify(headerState);
   };
@@ -337,7 +363,9 @@ export default function InspectionCapture() {
       setInspection(insp);
 
       const drawingData = insp.drawing_id ? await api.getDrawing(insp.drawing_id) : null;
-      setDrawing(drawingData);
+      // The sheet's own column list, not the template's -- it keeps any
+      // retired Find# this sheet already recorded readings in.
+      setDrawing(drawingData && { ...drawingData, points: insp.points || [] });
 
       applyHeaderState(insp);
       applyNotesState(insp);
@@ -654,6 +682,19 @@ export default function InspectionCapture() {
       if (!existing.has(i)) missing.push(i);
     }
     return missing;
+  };
+
+  // Kept in the part's operation order (by name) so the saved snapshot
+  // compares equal regardless of click order. Ticking any operation is what
+  // turns requires_in_process on -- the backend derives it the same way.
+  const handleRequiredOperationToggle = (operationId, checked) => {
+    setHeader((prev) => {
+      const picked = new Set(prev.required_operation_ids ?? []);
+      if (checked) picked.add(operationId);
+      else picked.delete(operationId);
+      const ids = inspection.operator_operations.filter((o) => picked.has(o.id)).map((o) => o.id);
+      return { ...prev, requires_in_process: ids.length > 0, required_operation_ids: ids };
+    });
   };
 
   const handleHeaderChange = (field, value) => {
@@ -1017,7 +1058,7 @@ export default function InspectionCapture() {
       />
       <div className="sheet-title-row">
         <div>
-          <h1>Data Sheet — {inspection.part_number}</h1>
+          <h1>Data Sheet — {inspection.part_number} Rev {inspection.drawing_rev || "N/A"}</h1>
           <span className={`status status-${resultStatus(inspection)}`}>{resultLabel(resultStatus(inspection))}</span>
         </div>
         <div className="sheet-toolbar">
@@ -1070,10 +1111,45 @@ export default function InspectionCapture() {
             </svg>
             {exportingPdf ? "Exporting…" : "Export PDF"}
           </button>
+          <button
+            type="button"
+            className="toolbar-btn"
+            disabled={exportingXlsx}
+            onClick={async () => {
+              setExportingXlsx(true);
+              try {
+                await downloadInspectionXlsx(inspectionId, inspectionPdfName(inspection));
+              } catch (e) {
+                setError(e.message);
+              } finally {
+                setExportingXlsx(false);
+              }
+            }}
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+              <rect x="3" y="3" width="18" height="18" rx="2" />
+              <path d="M3 9h18" />
+              <path d="M3 15h18" />
+              <path d="M9 3v18" />
+            </svg>
+            {exportingXlsx ? "Exporting…" : "Export Excel"}
+          </button>
         </div>
       </div>
 
       {error && <p className="error">{error}</p>}
+
+      {reminderDue != null && (
+        <p className={`reinspect-countdown${reminderNow >= reminderDue ? " is-due" : ""}`}>
+          {reminderNow >= reminderDue
+            ? `Re-inspection due now — enter the next readings (every ${formatMinutes(inspection.reinspect_interval_minutes)}).`
+            : `Next inspection due in ${formatMinutes(Math.ceil((reminderDue - reminderNow) / 60_000))}, at ${new Date(
+                reminderDue
+              ).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })} (every ${formatMinutes(
+                inspection.reinspect_interval_minutes
+              )}).`}
+        </p>
+      )}
 
       {isLocked && (
         <p className="sign-panel">
@@ -1098,8 +1174,22 @@ export default function InspectionCapture() {
           )}
         </div>
         <div className="header-grid">
-          {headerFieldsFor(inspection.type).map(([field, label]) =>
-            BOOLEAN_HEADER_FIELDS.includes(field) ? (
+          {headerFieldsFor(inspection).map(([field, label]) =>
+            field === "requires_in_process" && hasPerOperationRequirement(inspection) ? (
+              inspection.operator_operations.map((op) => (
+                <label key={`${field}-${op.id}`} className="header-field header-field-checkbox">
+                  <input
+                    type="checkbox"
+                    checked={(header.required_operation_ids ?? []).includes(op.id)}
+                    disabled={isLocked}
+                    onChange={(e) => handleRequiredOperationToggle(op.id, e.target.checked)}
+                  />
+                  <span className="muted">
+                    {label} — <strong>{op.name}</strong>
+                  </span>
+                </label>
+              ))
+            ) : BOOLEAN_HEADER_FIELDS.includes(field) ? (
               <label key={field} className="header-field header-field-checkbox">
                 <input
                   type="checkbox"

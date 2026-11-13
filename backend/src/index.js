@@ -14,6 +14,7 @@ const partsRouter = require("./routes/parts");
 const drawingsRouter = require("./routes/drawings");
 const inspectionsRouter = require("./routes/inspections");
 const adminRouter = require("./routes/admin");
+const inspectorAnalyticsRouter = require("./routes/inspectorAnalytics");
 const { getOrCreateDevCert } = require("./lib/devCert");
 
 const app = express();
@@ -54,6 +55,7 @@ app.use("/api/parts", requireAuth, partsRouter);
 app.use("/api/drawings", requireAuth, drawingsRouter);
 app.use("/api/inspections", requireAuth, inspectionsRouter);
 app.use("/api/admin", requireAuth, attachRole, requireRole("admin"), adminRouter);
+app.use("/api/inspector-analytics", requireAuth, attachRole, requireRole("qa_manager", "admin"), inspectorAnalyticsRouter);
 
 getOrCreateDevCert().then(({ key, cert }) => {
   https.createServer({ key, cert }, app).listen(PORT, () => {

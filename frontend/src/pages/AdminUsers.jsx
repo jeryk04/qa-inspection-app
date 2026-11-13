@@ -5,15 +5,33 @@ import { useAuth } from "../context/AuthContext";
 import { useConfirm } from "../hooks/useConfirm";
 import { ROLE_LABELS, formatDateTime } from "../lib/format";
 
-const ROLES = ["operator", "engineer", "qc", "supervisor", "admin"];
+const ROLES = ["operator", "engineer", "qc", "supervisor", "qa_manager", "admin"];
 // Sort order for the user table -- highest-access first, roughly matching
 // org hierarchy, not the create-form's ROLES order above. Supervisor sits
 // just under admin -- it exists mainly to delete an already-saved
 // inspection, a permission QC itself doesn't have (see inspections.js's
 // DELETE /:id).
-const ROLE_GROUP_ORDER = ["admin", "supervisor", "engineer", "qc", "operator"];
+const ROLE_GROUP_ORDER = ["admin", "qa_manager", "supervisor", "engineer", "qc", "operator"];
 
-const emptyNewUser = { username: "", password: "", full_name: "", role: "qc", email: "" };
+const emptyNewUser = { username: "", password: "", full_name: "", role: "qc", email: "", extra_roles: [] };
+
+// Additional roles on top of the main one -- the user gets the permissions
+// of all of them combined (see backend/src/lib/roles.js). The main role
+// isn't offered here since they already have it.
+function ExtraRolesPicker({ mainRole, value, onChange }) {
+  const toggle = (role) => onChange(value.includes(role) ? value.filter((r) => r !== role) : [...value, role]);
+  return (
+    <fieldset className="extra-roles-picker">
+      <legend>Additional roles</legend>
+      {ROLES.filter((r) => r !== mainRole).map((r) => (
+        <label key={r} className="hundred-percent-toggle">
+          <input type="checkbox" checked={value.includes(r)} onChange={() => toggle(r)} />
+          {ROLE_LABELS[r]}
+        </label>
+      ))}
+    </fieldset>
+  );
+}
 
 function EditIcon() {
   return (
@@ -56,6 +74,7 @@ export default function AdminUsers() {
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState(null); // { full_name, role, active, password, client_ids: Set }
   const [clientQuery, setClientQuery] = useState("");
+  const [userQuery, setUserQuery] = useState("");
 
   const load = () => {
     setLoading(true);
@@ -82,6 +101,17 @@ export default function AdminUsers() {
     });
   }, [users]);
 
+  // Matches full name, username or email. The row being edited always stays
+  // visible, so changing the search can't hide an open, unsaved edit form.
+  const trimmedUserQuery = userQuery.trim().toLowerCase();
+  const visibleUsers = trimmedUserQuery
+    ? sortedUsers.filter(
+        (u) =>
+          u.id === editingId ||
+          [u.full_name, u.username, u.email].some((v) => v && v.toLowerCase().includes(trimmedUserQuery))
+      )
+    : sortedUsers;
+
   const handleCreate = async (e) => {
     e.preventDefault();
     if (!newUser.username.trim() || !newUser.password || !newUser.full_name.trim()) return;
@@ -105,6 +135,7 @@ export default function AdminUsers() {
       active: !!user.active,
       password: "",
       email: user.email || "",
+      extra_roles: user.extra_roles || [],
       client_ids: new Set(user.client_ids),
     });
   };
@@ -148,6 +179,7 @@ export default function AdminUsers() {
       const payload = {
         full_name: editForm.full_name,
         role: editForm.role,
+        extra_roles: editForm.extra_roles.filter((r) => r !== editForm.role),
         active: editForm.active,
         email: editForm.email.trim(),
       };
@@ -217,11 +249,29 @@ export default function AdminUsers() {
               </option>
             ))}
           </select>
+          <ExtraRolesPicker
+            mainRole={newUser.role}
+            value={newUser.extra_roles}
+            onChange={(extra_roles) => setNewUser((u) => ({ ...u, extra_roles }))}
+          />
           <button type="submit">Add user</button>
         </form>
       )}
 
       {error && <p className="error">{error}</p>}
+
+      <div className="search-bar admin-users-search">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <circle cx="11" cy="11" r="7" />
+          <path d="m20 20-3.5-3.5" />
+        </svg>
+        <input
+          type="search"
+          placeholder="Search users by name, username or email..."
+          value={userQuery}
+          onChange={(e) => setUserQuery(e.target.value)}
+        />
+      </div>
 
       {loading ? (
         <p>Loading...</p>
@@ -238,7 +288,7 @@ export default function AdminUsers() {
             </tr>
           </thead>
           <tbody>
-            {sortedUsers.map((user) =>
+            {visibleUsers.map((user) =>
               editingId === user.id ? (
                 <tr key={user.id}>
                   <td colSpan={6}>
@@ -284,6 +334,12 @@ export default function AdminUsers() {
                           }
                         />
                       </div>
+
+                      <ExtraRolesPicker
+                        mainRole={editForm.role}
+                        value={editForm.extra_roles}
+                        onChange={(extra_roles) => setEditForm((f) => ({ ...f, extra_roles }))}
+                      />
 
                       <div className="admin-user-clients">
                         <div className="admin-user-clients-header">
@@ -355,7 +411,13 @@ export default function AdminUsers() {
                     </div>
                   </td>
                   <td>
-                    <span className={`role-badge role-badge-${user.role}`}>{ROLE_LABELS[user.role] ?? user.role}</span>
+                    <div className="role-badges">
+                      {[user.role, ...(user.extra_roles || [])].map((r) => (
+                        <span key={r} className={`role-badge role-badge-${r}`}>
+                          {ROLE_LABELS[r] ?? r}
+                        </span>
+                      ))}
+                    </div>
                   </td>
                   <td>
                     <span className={`status status-${user.active ? "active" : "inactive"}`}>
@@ -384,10 +446,10 @@ export default function AdminUsers() {
                 </tr>
               )
             )}
-            {sortedUsers.length === 0 && !loading && (
+            {visibleUsers.length === 0 && !loading && (
               <tr>
                 <td colSpan={6} className="muted">
-                  No users yet.
+                  {sortedUsers.length === 0 ? "No users yet." : `No users match "${userQuery.trim()}".`}
                 </td>
               </tr>
             )}

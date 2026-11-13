@@ -20,6 +20,11 @@
   --text: #1c2029;
   --text-muted: #6b7280;
   --accent-tint: #e8f0f6;
+  /* Chart series fills (DailyBars.jsx) -- validated with the dataviz
+     skill's palette checker against each theme's surface; the UI's own
+     --accent/--warn read too gray / too light as chart fills. */
+  --chart-series-clean: #2a78d6;
+  --chart-series-flagged: #8a5b00;
   --radius: 6px;
   --shadow-lg: 0 8px 24px rgba(16, 24, 40, 0.14);
   /* Lets the browser pick matching native chrome (checkboxes, <select>,
@@ -40,6 +45,8 @@
    since it's a replica of a printed paper form and should always look like
    paper, in dark mode or not. */
 :root[data-theme="dark"] {
+  --chart-series-clean: #3987e5;
+  --chart-series-flagged: #b8821a;
   --accent: #3f7cb0;
   --accent-bright: #4f90c4;
   --bg: #10151c;
@@ -1556,6 +1563,96 @@ h2 {
   flex-shrink: 0;
 }
 
+/* DataSheetTemplate.jsx -- In-Process re-inspection reminder setting. */
+.reinspect-reminder {
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: 14px;
+}
+
+.reinspect-reminder input {
+  width: 80px;
+}
+
+.reinspect-reminder select {
+  width: auto;
+}
+
+.reinspect-reminder-hint {
+  flex-basis: 100%;
+  font-size: 13px;
+}
+
+/* InspectionCapture.jsx -- the open sheet's own reminder countdown. */
+.reinspect-countdown {
+  background: var(--accent-tint);
+  color: var(--text);
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.reinspect-countdown.is-due {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+/* InspectionReminders.jsx -- due reminders, fixed in the corner of every
+   page so they're seen even while scrolled down a Data Sheet's grid. */
+.reinspect-stack {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(360px, calc(100vw - 32px));
+}
+
+.reinspect-alert {
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-left: 5px solid var(--warn);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  padding: 12px 14px;
+  color: var(--text);
+}
+
+.reinspect-alert-title {
+  color: var(--warn);
+  font-weight: 700;
+  font-size: 14px;
+}
+
+.reinspect-alert-sheet {
+  font-weight: 600;
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+}
+
+.reinspect-alert-meta {
+  color: var(--text-muted);
+  font-size: 13px;
+  margin-top: 2px;
+}
+
+.reinspect-alert-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
+.reinspect-alert-actions button,
+.reinspect-enable {
+  min-height: 36px;
+  padding: 6px 12px;
+  font-size: 13px;
+}
+
 input,
 select,
 textarea {
@@ -1728,6 +1825,32 @@ button.secondary-btn:hover {
 
 .context-menu-danger {
   color: var(--fail);
+}
+
+/* Data Sheet Template: drag a Find# column by its handle to reorder it. */
+.col-drag-handle {
+  display: block;
+  line-height: 1;
+  margin-bottom: 4px;
+  color: var(--text-muted);
+  cursor: grab;
+  user-select: none;
+}
+
+.col-drag-handle:hover {
+  color: var(--accent);
+}
+
+.col-dragging {
+  opacity: 0.4;
+}
+
+.capture-table th.drop-before {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.capture-table th.drop-after {
+  box-shadow: inset -3px 0 0 var(--accent);
 }
 
 .confirm-overlay {
@@ -2154,6 +2277,10 @@ button.reject {
   margin: 0;
 }
 
+.admin-users-search {
+  margin-top: 0;
+}
+
 .admin-create-user-panel {
   padding: 16px;
   align-items: center;
@@ -2203,6 +2330,11 @@ button.reject {
 .role-badge-supervisor {
   background: var(--fail-bg);
   color: var(--fail);
+}
+
+.role-badge-qa_manager {
+  background: var(--accent);
+  color: #fff;
 }
 
 .icon-btn {
@@ -3396,4 +3528,555 @@ th {
   color: var(--accent);
   font-weight: 700;
   background: var(--accent-tint);
+}
+
+/* Inspector Performance (InspectorPerformance.jsx / InspectorDetail.jsx) --
+   QA Manager's team view. Wider than .page's default: the per-person and
+   per-sheet tables carry a lot of columns. */
+.performance-page {
+  max-width: 1200px;
+}
+
+.performance-intro {
+  margin-top: -6px;
+  max-width: 760px;
+}
+
+.segmented {
+  display: inline-flex;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.segmented button {
+  border: none;
+  border-radius: 0;
+  background: var(--surface);
+  color: var(--text);
+  padding: 8px 12px;
+  font-weight: 600;
+  min-height: auto;
+}
+
+.segmented button + button {
+  border-left: 1px solid var(--border-strong);
+}
+
+.segmented button.segmented-active {
+  background: var(--accent-tint);
+  color: var(--accent-bright);
+}
+
+.performance-chart-card {
+  margin-top: 20px;
+  padding: 16px 20px 12px;
+}
+
+.performance-chart-card h2,
+.performance-flag-summary h2 {
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+
+.performance-table {
+  width: 100%;
+}
+
+.performance-table th.num,
+.performance-table td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.performance-results .result-ok {
+  color: var(--ok);
+}
+
+.performance-results .result-conditional {
+  color: var(--conditional);
+}
+
+.performance-results .result-fail {
+  color: var(--fail);
+}
+
+.flag-count {
+  color: var(--warn);
+  font-weight: 700;
+}
+
+.performance-person-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.performance-person-header h1 {
+  margin: 0;
+}
+
+.performance-flag-summary {
+  margin-top: 20px;
+}
+
+.performance-flag-summary ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.performance-flag-summary li {
+  background: var(--warn-bg);
+  color: var(--warn);
+  border-radius: 999px;
+  padding: 5px 12px;
+  font-size: 13px;
+}
+
+.performance-sheets-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 24px;
+}
+
+.performance-row-flagged td:first-child {
+  box-shadow: inset 3px 0 0 var(--warn);
+}
+
+.performance-flags {
+  min-width: 260px;
+  max-width: 420px;
+}
+
+/* One automatic flag: label + its detail, tinted by severity (always with
+   the text label, never color alone). */
+.sheet-flag {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  border-left: 3px solid var(--border-strong);
+  background: var(--surface-alt);
+  font-size: 12.5px;
+  line-height: 1.35;
+}
+
+.sheet-flag + .sheet-flag {
+  margin-top: 4px;
+}
+
+.sheet-flag span {
+  color: var(--text-muted);
+}
+
+.sheet-flag-error {
+  border-left-color: var(--fail);
+  background: var(--fail-bg);
+}
+
+.sheet-flag-error strong {
+  color: var(--fail);
+}
+
+.sheet-flag-warning {
+  border-left-color: var(--warn);
+  background: var(--warn-bg);
+}
+
+.sheet-flag-warning strong {
+  color: var(--warn);
+}
+
+.performance-links {
+  white-space: nowrap;
+}
+
+.performance-links a + a {
+  margin-left: 10px;
+}
+
+/* DailyBars.jsx -- stacked per-day bars. The day column (full height) is
+   the hover target; segments sit on the baseline with a 2px surface gap
+   between them and between days, rounded only on the top end. */
+.daily-bars {
+  position: relative;
+}
+
+.daily-bars-legend {
+  display: flex;
+  gap: 16px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.daily-bars-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.daily-bars-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+.daily-bars-swatch-clean,
+.daily-bars-seg-clean {
+  background: var(--chart-series-clean);
+}
+
+.daily-bars-swatch-flagged,
+.daily-bars-seg-flagged {
+  background: var(--chart-series-flagged);
+}
+
+.daily-bars-frame {
+  display: flex;
+  gap: 8px;
+  height: 170px;
+}
+
+.daily-bars-yaxis {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: flex-end;
+  font-size: 10px;
+  color: var(--text-muted);
+  min-width: 18px;
+  margin: -6px 0;
+}
+
+.daily-bars-plot {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+.daily-bars-gridline {
+  position: absolute;
+  left: 0;
+  right: 0;
+  border-top: 1px solid var(--border);
+}
+
+.daily-bars-columns {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  gap: 2px;
+}
+
+.daily-bars-col {
+  flex: 1;
+  min-width: 1px;
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 2px;
+  height: 100%;
+}
+
+.daily-bars-col-hover {
+  background: var(--accent-tint);
+}
+
+.daily-bars-seg {
+  width: 100%;
+  flex-shrink: 0;
+}
+
+.daily-bars-seg-top {
+  border-radius: 4px 4px 0 0;
+}
+
+.daily-bars-tooltip {
+  top: 0;
+  transform: translate(-50%, -105%);
+}
+
+.daily-bars-xaxis {
+  position: relative;
+  height: 18px;
+  margin-left: 26px;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.daily-bars-xaxis span {
+  position: absolute;
+  top: 4px;
+  transform: translateX(-50%);
+  white-space: nowrap;
+}
+
+.daily-bars-xaxis span:first-child {
+  transform: none;
+}
+
+.daily-bars-xaxis span:last-child {
+  transform: translateX(-100%);
+}
+
+/* A user's main role + any additional ones (AdminUsers.jsx). */
+.role-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+/* AdminUsers.jsx's "Additional roles" checkboxes (lib/roles.js). */
+.extra-roles-picker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 16px;
+  margin: 10px 0 0;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  flex-basis: 100%;
+}
+
+.extra-roles-picker legend {
+  padding: 0 4px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+/* Browse Customers setup status (Parts.jsx's SetupSummary, PartSetup.jsx)
+   -- template/drawing state per inspection type. Every chip/pill carries
+   its meaning in text (✓ / n/m / ✗ / —), color only reinforces it. */
+.setup-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.setup-chip {
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  background: var(--surface-alt);
+}
+
+.setup-chip-ready {
+  background: var(--ok-bg);
+  border-color: transparent;
+  color: var(--ok);
+}
+
+.setup-chip-partial {
+  background: var(--warn-bg);
+  border-color: transparent;
+  color: var(--warn);
+}
+
+.part-setup-description {
+  margin-top: -8px;
+}
+
+.part-setup-intro {
+  margin-bottom: 16px;
+}
+
+.part-setup-type {
+  margin-bottom: 14px;
+}
+
+.part-setup-type-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.part-setup-type-header h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.part-setup-type-links {
+  margin-left: auto;
+  display: flex;
+  gap: 14px;
+  font-size: 13.5px;
+}
+
+.setup-state {
+  font-size: 11.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: var(--table-header-bg);
+  color: var(--text-muted);
+}
+
+.setup-state-ready {
+  background: var(--ok-bg);
+  color: var(--ok);
+}
+
+.setup-state-partial {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+.part-setup-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+
+.part-setup-row-name {
+  font-weight: 600;
+  min-width: 160px;
+  flex: 1 1 160px;
+}
+
+.part-setup-row-link {
+  margin-left: auto;
+  font-size: 13.5px;
+  white-space: nowrap;
+}
+
+.part-setup-empty {
+  margin: 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.setup-pill {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 3px 9px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.setup-pill-ok {
+  background: var(--ok-bg);
+  color: var(--ok);
+}
+
+.setup-pill-missing {
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+}
+
+.setup-legend {
+  margin-top: -6px;
+  font-size: 12.5px;
+}
+
+/* .card resets link color; these are actions, so make them read as links. */
+.part-setup-type a {
+  color: var(--accent);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.part-setup-type a:hover {
+  text-decoration: underline;
+}
+
+/* Parts.jsx's clickable setup chips + inline "Attach drawing" form. */
+.setup-summary-wrap {
+  margin-top: 2px;
+}
+
+.card a.setup-chip-link {
+  text-decoration: none;
+  color: var(--text-muted);
+}
+
+.card a.setup-chip-link.setup-chip-ready {
+  color: var(--ok);
+}
+
+.card a.setup-chip-link.setup-chip-partial {
+  color: var(--warn);
+}
+
+.setup-chip-link:hover,
+.setup-chip-attach:hover {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+button.setup-chip-attach {
+  min-height: auto;
+  border: 1px dashed var(--accent);
+  background: var(--accent-tint);
+  color: var(--accent-bright);
+  cursor: pointer;
+  font-family: inherit;
+  line-height: inherit;
+}
+
+.setup-attach-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-alt);
+}
+
+.setup-attach-form input[type="file"] {
+  max-width: 260px;
+}
+
+.setup-attach-rev {
+  width: 110px;
+}
+
+/* Suppliers.jsx -- name + category on the left, part/template/drawing
+   counts on the right. */
+.supplier-card-link {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.supplier-category {
+  font-size: 12.5px;
+}
+
+.supplier-counts {
+  font-size: 12.5px;
+}
+
+.supplier-count-ok {
+  color: var(--ok);
+  font-weight: 600;
 }

@@ -2,18 +2,19 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
 import { useAuth } from "../context/AuthContext";
+import { hasAnyRole } from "../lib/roles";
 import { inspectionLabel, resultStatus, resultLabel } from "../lib/format";
 import { useConfirm } from "../hooks/useConfirm";
 import PageNav from "../components/PageNav";
 import TemplateEditLink from "../components/TemplateEditLink";
 
 // Matches DataSheetTemplate.jsx's own guard.
-const TEMPLATE_EDIT_ROLES = ["qc", "admin", "engineer", "supervisor"];
+const TEMPLATE_EDIT_ROLES = ["qc", "admin", "engineer", "supervisor", "qa_manager"];
 // This deletes any inspection (not the operation) -- matches backend/src/
 // routes/inspections.js's DELETE /:id, where only admin/supervisor can erase
 // a sheet with recorded data. QC, and an Operator on their own In-Process
 // list, can only discard blank ones (see canDiscardBlank below).
-const CAN_DELETE_ROLES = ["admin", "supervisor"];
+const CAN_DELETE_ROLES = ["admin", "supervisor", "qa_manager"];
 
 // Mirrors Inspections.jsx's "Data Sheet folder + history" structure, scoped
 // to one operation_id instead of a part's Final drawing. See Inspections.jsx
@@ -34,12 +35,12 @@ const TYPE_LABELS = { in_process: "In-Process", setup: "Set-up", samples: "Sampl
 export default function OperationDetail() {
   const { partId, operationId } = useParams();
   const { user } = useAuth();
-  const canEditTemplate = TEMPLATE_EDIT_ROLES.includes(user?.role);
-  const canDelete = CAN_DELETE_ROLES.includes(user?.role);
+  const canEditTemplate = hasAnyRole(user, TEMPLATE_EDIT_ROLES);
+  const canDelete = hasAnyRole(user, CAN_DELETE_ROLES);
   const [searchParams] = useSearchParams();
   const type = searchParams.get("type") || "in_process";
   const canDiscardBlank =
-    canDelete || user?.role === "qc" || (user?.role === "operator" && type === "in_process");
+    canDelete || hasAnyRole(user, ["qc"]) || (hasAnyRole(user, ["operator"]) && type === "in_process");
   const typeLabel = TYPE_LABELS[type] ?? type;
   const navigate = useNavigate();
   const [part, setPart] = useState(null);
@@ -106,7 +107,7 @@ export default function OperationDetail() {
 
   const handleDelete = async (inspection) => {
     setContextMenu(null);
-    if (!(await confirm("Are you sure you want to delete this inspection?"))) return;
+    if (!(await confirm("Delete this inspection? An admin can restore it from Recently Deleted if needed."))) return;
     try {
       await api.deleteInspection(inspection.id);
       load();
@@ -138,15 +139,21 @@ export default function OperationDetail() {
     }
   };
 
+  // An Operator In-Process operation opened by QC/admin (see
+  // OperationsList.jsx's ?scope=) goes back to that same list, not QC's.
+  const listHref = `/parts/${partId}/operations?type=${type}${
+    operation?.scope === "in_process_operator" ? "&scope=in_process_operator" : ""
+  }`;
+
   return (
     <div className="page">
       <PageNav
-        backTo={`/parts/${partId}/operations?type=${type}`}
+        backTo={listHref}
         backLabel="Back to Operations"
         items={[
           { label: "Home", to: "/" },
           { label: clientName ?? "…", to: part ? `/clients/${part.client_id}/parts?type=${type}` : "/clients" },
-          { label: part?.part_number ?? `Part #${partId}`, to: `/parts/${partId}/operations?type=${type}` },
+          { label: part?.part_number ?? `Part #${partId}`, to: listHref },
           { label: operation?.name ?? "Operation" },
         ]}
       />

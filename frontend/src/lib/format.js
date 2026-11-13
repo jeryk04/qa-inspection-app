@@ -32,6 +32,16 @@ export function formatDate(value) {
   return `${m[2]}/${m[3]}/${m[1]}`;
 }
 
+// QC's Set-up and QC's In-Process sheets don't record a total lot quantity
+// on paper -- only Final, Incoming, and the Operator's own In-Process sheet
+// do. Shared by the capture header, the sheet view, and (mirrored in)
+// backend/src/pdf/inspectionSheet.js's showsQuantity for the PDF/Excel.
+export function showsQuantity(inspection) {
+  if (inspection.type === "setup") return false;
+  if (inspection.type === "in_process") return inspection.operation_scope === "in_process_operator";
+  return true;
+}
+
 // 'conditionally_approved' isn't a real inspections.status value (see PUT
 // /:id/status in the backend) -- it's status='approved' with a
 // conditional_reason attached, so every badge/result display has to derive
@@ -75,6 +85,7 @@ export const ROLE_LABELS = {
   operator: "Operator",
   engineer: "Quality Analytics",
   supervisor: "Supervisor",
+  qa_manager: "QA Manager",
   admin: "Admin",
 };
 

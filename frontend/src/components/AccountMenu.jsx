@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { useTheme } from "../context/ThemeContext";
 import { ROLE_LABELS } from "../lib/format";
+import { hasAnyRole, rolesLabel } from "../lib/roles";
 
 const THEME_OPTIONS = [
   { value: "light", label: "Light" },
@@ -90,6 +91,7 @@ export default function AccountMenu({ user, viewAs, onSelectView, onLogout }) {
   const initials = initialsFor(user.full_name);
   const isAdmin = user.role === "admin";
   const isQc = user.role === "qc";
+  const isQaManager = hasAnyRole(user, ["qa_manager"]);
 
   const selectView = (role) => {
     setOpen(false);
@@ -127,7 +129,7 @@ export default function AccountMenu({ user, viewAs, onSelectView, onLogout }) {
             <span className="account-avatar account-avatar-lg">{initials}</span>
             <div>
               <div className="account-menu-fullname">{user.full_name}</div>
-              <div className="account-menu-role">{ROLE_LABELS[user.role] ?? user.role}</div>
+              <div className="account-menu-role">{rolesLabel(user)}</div>
             </div>
           </div>
 
@@ -137,11 +139,23 @@ export default function AccountMenu({ user, viewAs, onSelectView, onLogout }) {
               <Link to="/clients?browse=1" className="account-menu-item" onClick={() => setOpen(false)}>
                 Customers
               </Link>
+              <Link to="/suppliers" className="account-menu-item" onClick={() => setOpen(false)}>
+                Suppliers
+              </Link>
               <Link to="/history" className="account-menu-item" onClick={() => setOpen(false)}>
                 History
               </Link>
               <Link to="/wo-lookup" className="account-menu-item" onClick={() => setOpen(false)}>
                 WO# Lookup
+              </Link>
+            </div>
+          )}
+
+          {(isAdmin || isQaManager) && (
+            <div className="account-menu-section">
+              <div className="account-menu-section-label">Management</div>
+              <Link to="/team-performance" className="account-menu-item" onClick={() => setOpen(false)}>
+                Inspector Performance
               </Link>
             </div>
           )}

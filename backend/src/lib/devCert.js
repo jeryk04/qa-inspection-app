@@ -1,6 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const crypto = require("crypto");
 const selfsigned = require("selfsigned");
 
 const CERT_DIR = path.join(__dirname, "..", "..", "certs");
@@ -35,7 +36,17 @@ async function getOrCreateDevCert() {
 
   if (fs.existsSync(KEY_PATH) && fs.existsSync(CERT_PATH)) {
     const cert = fs.readFileSync(CERT_PATH, "utf8");
-    const coversAll = altNames.every((n) => cert.includes(n.ip || n.value));
+    // The PEM itself is base64, so the SAN entries have to be read from the
+    // parsed cert -- e.g. "DNS:localhost, IP Address:127.0.0.1".
+    let sans = [];
+    try {
+      sans = (new crypto.X509Certificate(cert).subjectAltName || "").split(", ");
+    } catch {
+      // unreadable cert -- fall through and regenerate
+    }
+    const coversAll = altNames.every((n) =>
+      sans.includes(n.ip ? `IP Address:${n.ip}` : `DNS:${n.value}`)
+    );
     if (coversAll) {
       return { key: fs.readFileSync(KEY_PATH, "utf8"), cert };
     }

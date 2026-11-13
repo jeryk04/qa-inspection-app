@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api/client";
 import { useAuth } from "../context/AuthContext";
-import { ROLE_LABELS } from "../lib/format";
+import { rolesLabel, rolesOf } from "../lib/roles";
 
 // Self-service account details, reached from AccountMenu. Read-only for now
 // (full name/role/username are admin-managed, see AdminUsers.jsx) except
@@ -48,8 +48,8 @@ export default function MyAccount() {
           <input value={user?.username || ""} disabled />
         </label>
         <label className="login-field">
-          <span>Role</span>
-          <input value={ROLE_LABELS[user?.role] ?? user?.role ?? ""} disabled />
+          <span>{rolesOf(user).length > 1 ? "Roles" : "Role"}</span>
+          <input value={rolesLabel(user)} disabled />
         </label>
         <label className="login-field">
           <span>Email (optional)</span>

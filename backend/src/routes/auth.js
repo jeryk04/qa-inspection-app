@@ -4,6 +4,7 @@ const db = require("../db");
 const { signToken, verifyToken, COOKIE_NAME } = require("../lib/jwt");
 const { PIN_LENGTH, isValidPin } = require("../lib/pin");
 const { isValidEmail } = require("../lib/email");
+const { loadRoles } = require("../lib/roles");
 
 const router = express.Router();
 
@@ -32,11 +33,14 @@ router.post("/login", (req, res) => {
 
   const token = signToken(user);
   res.cookie(COOKIE_NAME, token, COOKIE_OPTIONS);
+  // role = highest of the user's roles, roles = all of them (lib/roles.js).
+  const { role, roles } = loadRoles(user.id);
   res.json({
     id: user.id,
     username: user.username,
     full_name: user.full_name,
-    role: user.role,
+    role,
+    roles,
     must_change_password: !!user.must_change_password,
   });
 });
@@ -60,7 +64,8 @@ router.get("/me", (req, res) => {
       .prepare("SELECT id, username, full_name, role, must_change_password, email FROM users WHERE id = ?")
       .get(payload.sub);
     if (!user) return res.status(401).json({ error: "Not authenticated" });
-    res.json({ ...user, must_change_password: !!user.must_change_password });
+    const { role, roles } = loadRoles(user.id);
+    res.json({ ...user, role, roles, must_change_password: !!user.must_change_password });
   } catch {
     res.status(401).json({ error: "Not authenticated" });
   }

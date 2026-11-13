@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
 import { useAuth } from "../context/AuthContext";
+import { hasAnyRole } from "../lib/roles";
 import { inspectionLabel, resultStatus, resultLabel } from "../lib/format";
 import { useConfirm } from "../hooks/useConfirm";
 import PageNav from "../components/PageNav";
@@ -11,7 +12,7 @@ import TemplateEditLink from "../components/TemplateEditLink";
 // DELETE /:id and OperationDetail.jsx's own guard for the same action
 // scoped to an operation. Only admin/supervisor can erase a sheet with
 // recorded data; QC can only discard blank ones (see canDiscardBlank below).
-const CAN_DELETE_ROLES = ["admin", "supervisor"];
+const CAN_DELETE_ROLES = ["admin", "supervisor", "qa_manager"];
 
 // The "Data Sheet" folder at the top is the entry point an inspector opens
 // every time an inspection is needed: it resumes the currently open (in
@@ -21,8 +22,8 @@ export default function Inspections() {
   const { partId } = useParams();
   const navigate = useNavigate();
   const { user } = useAuth();
-  const canDelete = CAN_DELETE_ROLES.includes(user?.role);
-  const canDiscardBlank = canDelete || user?.role === "qc";
+  const canDelete = hasAnyRole(user, CAN_DELETE_ROLES);
+  const canDiscardBlank = canDelete || hasAnyRole(user, ["qc"]);
   const [searchParams] = useSearchParams();
   // Defaults to "final" -- the original, still-only-supported value for the
   // normal QC path (see Clients.jsx for where a non-default type comes from).
@@ -83,7 +84,7 @@ export default function Inspections() {
 
   const handleDelete = async (inspection) => {
     setContextMenu(null);
-    if (!(await confirm("Are you sure you want to delete this inspection?"))) return;
+    if (!(await confirm("Delete this inspection? An admin can restore it from Recently Deleted if needed."))) return;
     try {
       await api.deleteInspection(inspection.id);
       load();

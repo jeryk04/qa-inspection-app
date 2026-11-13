@@ -109,10 +109,10 @@ const MIN_COL_WIDTH = 26;
 const MAX_NATURAL_COL_WIDTH = 80;
 const GRID_ROW_LABELS = ["Find #", "Max. Spec.", "MEAN", "Min. Spec."];
 
-// Breaks one inspection's Find# columns into column groups (each one a full
-// set of sample rows, drawn one after another) -- pure data, no drawing, so
-// the grouping and the per-column widths are decided once, up front.
-function planReportPages(inspection, doc) {
+// Which Find# columns go in the grid vs. the check-column tally table, and
+// which sample rows print -- pure data, shared with the Excel export
+// (backend/src/excel/inspectionSheet.js) so both exports always agree.
+function getSheetLayout(inspection) {
   const allPoints = inspection.points && inspection.points.length > 0
     ? inspection.points
     : uniquePoints(inspection.measurements);
@@ -161,6 +161,15 @@ function planReportPages(inspection, doc) {
 
   const machineLogMode = !!inspection.machine_log_mode;
   const sampleRowsByNumber = Object.fromEntries((inspection.sampleRows || []).map((r) => [r.sample_number, r]));
+
+  return { summaryPoints, points, gridSamples, machineLogMode, sampleRowsByNumber };
+}
+
+// Breaks one inspection's Find# columns into column groups (each one a full
+// set of sample rows, drawn one after another) -- pure data, no drawing, so
+// the grouping and the per-column widths are decided once, up front.
+function planReportPages(inspection, doc) {
+  const { summaryPoints, points, gridSamples, machineLogMode, sampleRowsByNumber } = getSheetLayout(inspection);
 
   const pageWidth = PAGE_WIDTH - PAGE_MARGIN * 2;
   const grid = buildGrid(inspection.measurements);
@@ -230,9 +239,9 @@ function buildPageJobs(plan) {
 
 function generateInspectionPdf(res, inspection) {
   // A Final Inspection that required an Operator In-Process Data Sheet
-  // bundles that companion sheet in as its own independently-paginated
-  // section -- see linkedInProcess in getInspectionDetail
-  // (routes/inspections.js). Its own drawHeader call already shows
+  // bundles each companion sheet (one per Operator operation) in as its own
+  // independently-paginated section -- see linkedInProcesses in
+  // getInspectionDetail (routes/inspections.js). Each one's drawHeader call already shows
   // "IN-PROCESS INSPECTION DATA SHEET" prominently, so no extra divider/
   // label is needed beyond the page break itself.
   // bufferPages so "Sheet X of Y" can be stamped after the fact -- a long
@@ -243,7 +252,7 @@ function generateInspectionPdf(res, inspection) {
 
   // Planned against the doc so column widths come from real text metrics.
   const plans = [planReportPages(inspection, doc)];
-  if (inspection.linkedInProcess) plans.push(planReportPages(inspection.linkedInProcess, doc));
+  (inspection.linkedInProcesses || []).forEach((linked) => plans.push(planReportPages(linked, doc)));
   const jobs = plans.flatMap(buildPageJobs);
 
   const currentPage = () => doc.bufferedPageRange().count - 1;
@@ -301,7 +310,7 @@ function newContinuationPage(doc, inspection) {
     .font("Helvetica-Bold")
     .fontSize(9)
     .fillColor(COLOR.primary)
-    .text(`${title} — Part # ${inspection.part_number ?? ""} (continued)`, PAGE_MARGIN, SHEET_LABEL_Y, {
+    .text(`${title} — Part # ${inspection.part_number ?? ""} Rev ${inspection.drawing_rev || "N/A"} (continued)`, PAGE_MARGIN, SHEET_LABEL_Y, {
       lineBreak: false,
     });
   doc.fillColor("#000");
@@ -408,7 +417,7 @@ function drawHeader(doc, inspection, pageWidth) {
   // for print here.
   const fields = getMetaFields(inspection, formatDate(inspection.date));
   // Always exactly two rows sharing one column grid, so every label lines
-  // up under the one above it whatever the field count (8 for Final, 9
+  // up under the one above it whatever the field count (9 for Final, 10
   // with an Operation or Incoming's Heat #).
   const cols = Math.ceil(fields.length / 2);
   const isConditional = getResult(inspection) === "conditionally_approved";
@@ -502,6 +511,15 @@ function metaDisplay(value) {
   return value != null && value !== "" ? String(value) : "—";
 }
 
+// QC's Set-up and QC's In-Process sheets don't record a total lot quantity
+// on paper -- only Final, Incoming, and the Operator's own In-Process sheet
+// do. Mirrors frontend/src/lib/format.js's showsQuantity.
+function showsQuantity(inspection) {
+  if (inspection.type === "setup") return false;
+  if (inspection.type === "in_process") return inspection.operation_scope === "in_process_operator";
+  return true;
+}
+
 // The header card's fields in reading order: who/what first (row 1), then
 // the inspection's own numbers and sign-off (row 2). Incoming tracks
 // material FROM a supplier by PO#/heat instead of a customer Job#-WO# --
@@ -512,6 +530,7 @@ function getMetaFields(inspection, date) {
   const operationName = inspection.operation_name || inspection.operation;
   return [
     ["Part #", inspection.part_number],
+    ["Rev", inspection.drawing_rev || "N/A"],
     ...(inspection.type === "incoming"
       ? [
           ["Supplier", inspection.supplier],
@@ -523,7 +542,7 @@ function getMetaFields(inspection, date) {
           ["Job# / WO#", inspection.job_number],
         ]),
     ...(operationName ? [["Operation", operationName]] : []),
-    ["Quantity", inspection.quantity],
+    ...(showsQuantity(inspection) ? [["Quantity", inspection.quantity]] : []),
     ["Sampling Plan", inspection.sampling_plan_n],
     ["Total Rejected", inspection.sampling_plan_c],
     ["By", inspection.signature ? inspection.signature.full_name : inspection.inspector],
@@ -977,4 +996,18 @@ function drawSummaryTable(doc, summaryPoints, inspection, pageWidth, newPage) {
   doc.y = y + 10;
 }
 
-module.exports = { generateInspectionPdf };
+module.exports = {
+  generateInspectionPdf,
+  // Shared with the Excel export so both render the same sheet.
+  getSheetLayout,
+  getMetaFields,
+  getResult,
+  summarizeCheckPoint,
+  buildGrid,
+  formatDate,
+  formatSampleLabel,
+  RESULT_LABELS,
+  TYPE_TITLES,
+  COMPANY,
+  COLOR,
+};

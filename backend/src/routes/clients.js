@@ -37,7 +37,7 @@ router.get("/:id", attachRole, (req, res) => {
 // POST /api/clients -- catalog maintenance, only ever submitted from the
 // Browse Customers screen now (see frontend Clients.jsx's isBrowseMode);
 // this is still the real enforcement, that's just UI.
-router.post("/", attachRole, requireRole("qc", "admin", "engineer", "supervisor"), (req, res) => {
+router.post("/", attachRole, requireRole("qc", "admin", "engineer", "supervisor", "qa_manager"), (req, res) => {
   const { name } = req.body;
   if (!name) return res.status(400).json({ error: "name is required" });
 
@@ -48,7 +48,7 @@ router.post("/", attachRole, requireRole("qc", "admin", "engineer", "supervisor"
 });
 
 // PUT /api/clients/:id
-router.put("/:id", attachRole, requireRole("qc", "admin", "supervisor"), (req, res) => {
+router.put("/:id", attachRole, requireRole("qc", "admin", "supervisor", "qa_manager"), (req, res) => {
   const { name } = req.body;
   const result = db
     .prepare("UPDATE clients SET name = COALESCE(?, name) WHERE id = ?")
@@ -61,7 +61,7 @@ router.put("/:id", attachRole, requireRole("qc", "admin", "supervisor"), (req, r
 
 // DELETE /api/clients/:id  (cascades to its parts/drawings/inspections; blocked if
 // any inspection already has recorded measurements, to protect quality records)
-router.delete("/:id", attachRole, requireRole("qc", "admin", "supervisor"), (req, res) => {
+router.delete("/:id", attachRole, requireRole("qc", "admin", "supervisor", "qa_manager"), (req, res) => {
   try {
     const result = db.prepare("DELETE FROM clients WHERE id = ?").run(req.params.id);
     if (result.changes === 0) return res.status(404).json({ error: "Client not found" });

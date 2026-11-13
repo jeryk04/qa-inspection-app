@@ -4,13 +4,12 @@ import PageNav from "../components/PageNav";
 import { useConfirm } from "../hooks/useConfirm";
 import { timeAgo } from "../lib/format";
 
-const ENTITY_LABELS = { operation: "Operation" };
+const ENTITY_LABELS = { operation: "Operation", inspection: "Data Sheet" };
 
 // Admin-only recycle bin -- lists deleted_items still awaiting recovery
-// (see backend/src/lib/trash.js). Today the only entity_type that lands
-// here is 'operation', since deleting one now cascades its Data Sheet
-// Template and inspection history instead of being blocked (see
-// OperationsList.jsx's delete confirm).
+// (see backend/src/lib/trash.js): deleted Operations (with their Data Sheet
+// Template and inspection history, see OperationsList.jsx's delete confirm)
+// and single Data Sheets deleted from History or a Data Sheets list.
 export default function AdminTrash() {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);

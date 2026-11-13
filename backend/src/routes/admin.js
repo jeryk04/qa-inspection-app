@@ -4,6 +4,7 @@ const db = require("../db");
 const { restoreEntity } = require("../lib/trash");
 const { PIN_LENGTH, isValidPin } = require("../lib/pin");
 const { isValidEmail } = require("../lib/email");
+const { ALL_ROLES } = require("../lib/roles");
 
 // Mounted with requireAuth/attachRole/requireRole("admin") already applied
 // in index.js -- every route here is admin-only, so it's gated once at
@@ -36,6 +37,8 @@ router.post("/trash/:id/restore", (req, res) => {
     if (err.code === "SQLITE_CONSTRAINT_UNIQUE") {
       return res.status(409).json({ error: "This can't be restored — something with the same name already exists." });
     }
+    // A restorer's own "can't restore because…" (see lib/trash.js).
+    if (err.status === 409) return res.status(409).json({ error: err.message });
     throw err;
   }
 });
@@ -46,6 +49,24 @@ router.delete("/trash/:id", (req, res) => {
   const result = db.prepare("DELETE FROM deleted_items WHERE id = ? AND restored_at IS NULL").run(req.params.id);
   if (result.changes === 0) return res.status(404).json({ error: "Item not found (or already restored)" });
   res.status(204).send();
+});
+
+const getExtraRoles = db.prepare("SELECT role FROM user_roles WHERE user_id = ? ORDER BY role");
+
+// Additional roles (user_roles, see lib/roles.js) -- `role` stays the main
+// one; these add to it. Rejects unknown role names instead of silently
+// dropping them, and never stores the main role a second time.
+function invalidExtraRoles(extraRoles) {
+  if (extraRoles === undefined) return null;
+  if (!Array.isArray(extraRoles)) return "extra_roles must be a list of roles";
+  const bad = extraRoles.filter((r) => !ALL_ROLES.includes(r));
+  return bad.length ? `Unknown role(s): ${bad.join(", ")}` : null;
+}
+
+const replaceExtraRoles = db.transaction((userId, mainRole, extraRoles) => {
+  db.prepare("DELETE FROM user_roles WHERE user_id = ?").run(userId);
+  const insert = db.prepare("INSERT INTO user_roles (user_id, role) VALUES (?, ?)");
+  for (const r of new Set(extraRoles)) if (r !== mainRole) insert.run(userId, r);
 });
 
 // GET /api/admin/users -- never returns password_hash.
@@ -59,15 +80,24 @@ router.get("/users", (req, res) => {
     if (!clientIdsByUser.has(r.user_id)) clientIdsByUser.set(r.user_id, []);
     clientIdsByUser.get(r.user_id).push(r.client_id);
   });
-  res.json(users.map((u) => ({ ...u, client_ids: clientIdsByUser.get(u.id) || [] })));
+  const extraRolesByUser = new Map();
+  db.prepare("SELECT user_id, role FROM user_roles ORDER BY role").all().forEach((r) => {
+    if (!extraRolesByUser.has(r.user_id)) extraRolesByUser.set(r.user_id, []);
+    extraRolesByUser.get(r.user_id).push(r.role);
+  });
+  res.json(
+    users.map((u) => ({ ...u, extra_roles: extraRolesByUser.get(u.id) || [], client_ids: clientIdsByUser.get(u.id) || [] }))
+  );
 });
 
-// POST /api/admin/users  { username, password, full_name, role, email? }
+// POST /api/admin/users  { username, password, full_name, role, email?, extra_roles? }
 router.post("/users", (req, res) => {
-  const { username, password, full_name, role, email } = req.body;
+  const { username, password, full_name, role, email, extra_roles } = req.body;
   if (!username || !password || !full_name || !role) {
     return res.status(400).json({ error: "username, password, full_name, and role are required" });
   }
+  const extraRolesError = invalidExtraRoles(extra_roles);
+  if (extraRolesError) return res.status(400).json({ error: extraRolesError });
   if (!isValidPin(password)) {
     return res.status(400).json({ error: `PIN must be exactly ${PIN_LENGTH} digits` });
   }
@@ -85,10 +115,11 @@ router.post("/users", (req, res) => {
         "INSERT INTO users (username, password_hash, full_name, role, email, must_change_password) VALUES (?, ?, ?, ?, ?, 1)"
       )
       .run(username, password_hash, full_name, role, trimmedEmail);
+    if (extra_roles) replaceExtraRoles(result.lastInsertRowid, role, extra_roles);
     const user = db
       .prepare("SELECT id, username, full_name, role, active, last_login, email, created_at FROM users WHERE id = ?")
       .get(result.lastInsertRowid);
-    res.status(201).json({ ...user, client_ids: [] });
+    res.status(201).json({ ...user, extra_roles: getExtraRoles.all(user.id).map((r) => r.role), client_ids: [] });
   } catch (err) {
     if (err.code === "SQLITE_CONSTRAINT_UNIQUE") {
       return res.status(409).json({ error: `Username "${username}" is already taken.` });
@@ -97,9 +128,11 @@ router.post("/users", (req, res) => {
   }
 });
 
-// PUT /api/admin/users/:id  { full_name?, role?, active?, password?, email? }
+// PUT /api/admin/users/:id  { full_name?, role?, active?, password?, email?, extra_roles? }
 router.put("/users/:id", (req, res) => {
-  const { full_name, role, active, password, email } = req.body;
+  const { full_name, role, active, password, email, extra_roles } = req.body;
+  const extraRolesError = invalidExtraRoles(extra_roles);
+  if (extraRolesError) return res.status(400).json({ error: extraRolesError });
 
   const setClauses = [];
   const params = [];
@@ -140,8 +173,14 @@ router.put("/users/:id", (req, res) => {
     .prepare("SELECT id, username, full_name, role, active, last_login, email, created_at FROM users WHERE id = ?")
     .get(req.params.id);
   if (!user) return res.status(404).json({ error: "User not found" });
+  // Re-sync even when only the main role changed, so a role that just became
+  // the main one isn't also left listed as an additional one.
+  const currentExtras = getExtraRoles.all(user.id).map((r) => r.role);
+  if (extra_roles !== undefined || currentExtras.includes(user.role)) {
+    replaceExtraRoles(user.id, user.role, extra_roles ?? currentExtras);
+  }
   const clientIds = db.prepare("SELECT client_id FROM user_clients WHERE user_id = ?").all(req.params.id);
-  res.json({ ...user, client_ids: clientIds.map((r) => r.client_id) });
+  res.json({ ...user, extra_roles: getExtraRoles.all(user.id).map((r) => r.role), client_ids: clientIds.map((r) => r.client_id) });
 });
 
 // PUT /api/admin/users/:id/clients  { client_ids: [...] } -- for an Operator

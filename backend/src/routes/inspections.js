@@ -3,6 +3,7 @@ const multer = require("multer");
 const path = require("path");
 const db = require("../db");
 const { generateInspectionPdf } = require("../pdf/inspectionSheet");
+const { generateInspectionXlsx } = require("../excel/inspectionSheet");
 const {
   recordAudit,
   recordHeaderAudit,
@@ -16,6 +17,20 @@ const attachRole = require("../middleware/attachRole");
 const requireRole = require("../middleware/requireRole");
 const { isAssignedToClient } = require("../lib/operatorAccess");
 const { computeWithinTolerance } = require("../lib/tolerance");
+const { performedBySql, DATA_ENTRY_ACTIONS } = require("../lib/performedBy");
+const { hasRole } = require("../lib/roles");
+const { archiveInspection } = require("../lib/trash");
+
+// How a deleted Data Sheet is named in Recently Deleted.
+const TRASH_TYPE_LABELS = {
+  final: "Final",
+  setup: "Set-up",
+  in_process: "In-Process",
+  incoming: "Incoming",
+  samples: "Samples",
+  quote: "Quote",
+  other: "Other",
+};
 
 const router = express.Router();
 
@@ -108,8 +123,11 @@ const BOOLEAN_HEADER_FIELDS = ["requires_in_process", "hundred_percent_inspectio
 // "the operator did their check". Scoped to the same WO#/Job# when the Final
 // Inspection has one, since that's the specific production run being signed
 // off; falls back to "any WO# for this part" when it doesn't.
-function hasQualifyingInProcess(partId, jobNumber) {
+// With an operationId, only that operation's sheets count (a Final that
+// requires specific Operator operations -- see requiredOperations below).
+function hasQualifyingInProcess(partId, jobNumber, operationId = null) {
   const jobFilter = jobNumber && jobNumber.trim() ? "AND ip.job_number = @jobNumber" : "";
+  const operationFilter = operationId ? "AND ip.operation_id = @operationId" : "";
   const row = db
     .prepare(
       `SELECT EXISTS(
@@ -117,14 +135,40 @@ function hasQualifyingInProcess(partId, jobNumber) {
          WHERE ip.part_id = @partId
            AND ip.type = 'in_process'
            ${jobFilter}
+           ${operationFilter}
            AND (
              EXISTS (SELECT 1 FROM measurements m WHERE m.inspection_id = ip.id)
              OR EXISTS (SELECT 1 FROM inspection_point_summaries ips WHERE ips.inspection_id = ip.id AND ips.qty_inspected > 0)
            )
        ) AS found`
     )
-    .get({ partId, jobNumber: jobNumber || null });
+    .get({ partId, jobNumber: jobNumber || null, operationId });
   return !!row.found;
+}
+
+// The part's Operator In-Process operations -- what a Final's "Operator
+// In-Process Data Sheet required" can be set per operation for. Ordered by
+// name, same as OperationsList.jsx.
+const listOperatorOperations = db.prepare(
+  "SELECT id, name FROM operations WHERE part_id = ? AND scope = 'in_process_operator' ORDER BY name"
+);
+const listRequiredOperationRows = db.prepare(
+  `SELECT o.id, o.name FROM inspection_required_operations r
+   JOIN operations o ON o.id = r.operation_id
+   WHERE r.inspection_id = ? ORDER BY o.name`
+);
+
+// The Operator operations a Final Inspection actually requires a sheet for
+// ({ id, name } list): the ones ticked on its header
+// (inspection_required_operations), or -- when none are stored, e.g. a
+// single-operation part or a Final from before per-operation picking --
+// every Operator operation on the part. Empty when nothing's required, or
+// when the part has no Operator operations at all (then any In-Process
+// sheet for the WO# counts, as before operations existed).
+function requiredOperations(inspection) {
+  if (inspection.type !== "final" || !inspection.requires_in_process) return [];
+  const picked = listRequiredOperationRows.all(inspection.id);
+  return picked.length > 0 ? picked : listOperatorOperations.all(inspection.part_id);
 }
 
 // GET /api/inspections?part_id=1&type=final&client_id=1&status=approved&date_from=2026-01-01&date_to=2026-12-31&operation_id=1&job_number=12345
@@ -151,13 +195,17 @@ router.get("/", (req, res) => {
   // anyone can type/leave blank) -- LEFT JOIN since created_by is nullable
   // (older rows, or ones created some other way) and shouldn't drop the
   // inspection from the list just because that link is missing.
+  // performed_by_name: who actually did the inspection (see lib/performedBy.js)
+  // -- differs from created_by_name when e.g. QC opens a sheet an Operator fills.
   let query = `
     SELECT i.*, p.part_number, p.client_id, c.name AS client_name, u.full_name AS created_by_name,
+           pb.full_name AS performed_by_name,
            ${IS_BLANK_SQL} AS is_blank
     FROM inspections i
     JOIN parts p ON p.id = i.part_id
     JOIN clients c ON c.id = p.client_id
     LEFT JOIN users u ON u.id = i.created_by
+    LEFT JOIN users pb ON pb.id = ${performedBySql("i")}
     WHERE 1 = 1
   `;
   const params = [];
@@ -216,7 +264,7 @@ router.get("/", (req, res) => {
 // not a free-text comparison against the inspector field) --
 // deliberately scoped per-operator for now (an operator only sees their own work),
 // can be loosened to company-wide visibility later if needed.
-router.get("/status-lookup", attachRole, requireRole("operator", "qc", "admin", "supervisor"), (req, res) => {
+router.get("/status-lookup", attachRole, requireRole("operator", "qc", "admin", "supervisor", "qa_manager"), (req, res) => {
   const { part_number, job_number } = req.query;
   if (!part_number) return res.status(400).json({ error: "part_number is required" });
 
@@ -224,9 +272,11 @@ router.get("/status-lookup", attachRole, requireRole("operator", "qc", "admin", 
     SELECT i.id, p.part_number, i.job_number, i.type, i.status, i.conditional_reason, i.date, i.inspector
     FROM inspections i
     JOIN parts p ON p.id = i.part_id
-    WHERE LOWER(p.part_number) = LOWER(?) AND i.created_by = ?
+    WHERE LOWER(p.part_number) = LOWER(?) AND (i.created_by = ? OR ${performedBySql("i")} = ?)
   `;
-  const params = [part_number, req.user.id];
+  // Also the sheets this user performed but didn't open themselves (e.g. QC
+  // opened it, the Operator filled and signed it -- see lib/performedBy.js).
+  const params = [part_number, req.user.id, req.user.id];
 
   if (job_number) {
     query += " AND i.job_number = ?";
@@ -249,8 +299,9 @@ router.get("/dashboard-stats", (req, res) => {
   const scope = [];
   const params = [];
   if (mine) {
-    scope.push("i.created_by = ?");
-    params.push(req.user.id);
+    // Created by this user, or performed by them (see lib/performedBy.js).
+    scope.push(`(i.created_by = ? OR ${performedBySql("i")} = ?)`);
+    params.push(req.user.id, req.user.id);
   }
   if (type) {
     scope.push("i.type = ?");
@@ -312,6 +363,9 @@ router.get("/dashboard-stats", (req, res) => {
 // sheets now, even ones QC set up for them); operators always get `mine`.
 // `customers` lists every customer with signed activity in the same
 // mine/type scope (ignoring the other filters), for the Customer dropdown.
+const WAS_UNLOCKED_SQL = `EXISTS (SELECT 1 FROM audit_log a
+  WHERE a.entity_type = 'inspection' AND a.entity_id = i.id AND a.action = 'unlocked')`;
+
 router.get("/recent-activity", attachRole, (req, res) => {
   const { type, client_id, result, q } = req.query;
   const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 10, 1), 50);
@@ -321,8 +375,8 @@ router.get("/recent-activity", attachRole, (req, res) => {
   const scope = ["i.status IN ('approved', 'rejected')"];
   const scopeParams = [];
   if (mine) {
-    scope.push("(i.created_by = ? OR s.user_id = ?)");
-    scopeParams.push(req.user.id, req.user.id);
+    scope.push(`(i.created_by = ? OR s.user_id = ? OR ${performedBySql("i")} = ?)`);
+    scopeParams.push(req.user.id, req.user.id, req.user.id);
   }
   if (type) {
     scope.push("i.type = ?");
@@ -359,19 +413,26 @@ router.get("/recent-activity", attachRole, (req, res) => {
     filterParams.push(like, like, like);
   }
 
+  // `day` (local YYYY-MM-DD) is what the feed groups and sorts by: normally
+  // the day of the latest signature, but a sheet that was unlocked to fix
+  // something and signed again (`corrected`) stays under its Data Sheet
+  // date -- a correction isn't new inspection work, so it shouldn't jump
+  // back to the top as "Today".
   const rows = db
     .prepare(
       `SELECT i.id AS inspection_id, i.type, i.status, i.conditional_reason, i.job_number, i.po_number,
               s.signed_at AS at, signer.full_name AS signer_name,
               p.part_number, c.id AS client_id, c.name AS client_name,
               o.name AS operation_name, o.scope AS operation_scope,
-              u.role AS creator_role
+              u.role AS creator_role,
+              ${WAS_UNLOCKED_SQL} AS corrected,
+              CASE WHEN ${WAS_UNLOCKED_SQL} THEN substr(i.date, 1, 10) ELSE date(s.signed_at, 'localtime') END AS day
        ${fromLatestSignature}
        LEFT JOIN users signer ON signer.id = s.user_id
        LEFT JOIN operations o ON o.id = i.operation_id
        LEFT JOIN users u ON u.id = i.created_by
        WHERE ${filters.join(" AND ")}
-       ORDER BY s.signed_at DESC, s.id DESC
+       ORDER BY day DESC, s.signed_at DESC, s.id DESC
        LIMIT ? OFFSET ?`
     )
     .all(...filterParams, limit + 1, offset);
@@ -392,7 +453,7 @@ router.get("/recent-activity", attachRole, (req, res) => {
 // Company-wide only (no mine=1 scoping like dashboard-stats above) since
 // trend/tolerance analysis across parts doesn't make sense scoped to one
 // operator's own work.
-router.get("/analytics", attachRole, requireRole("qc", "admin", "engineer", "supervisor"), (req, res) => {
+router.get("/analytics", attachRole, requireRole("qc", "admin", "engineer", "supervisor", "qa_manager"), (req, res) => {
   // Zero-filled so the trend line has a real point for every day in the
   // window, not just the days something happened to be dated to.
   const volumeRows = db
@@ -545,7 +606,7 @@ router.get("/analytics", attachRole, requireRole("qc", "admin", "engineer", "sup
 // dismissed_alerts in schema.sql for why this is keyed by measurement_id,
 // not balloon_point_id: a newer measurement on the same point naturally
 // supersedes the dismissal instead of needing it cleared by hand).
-router.post("/analytics/dismiss-alert", attachRole, requireRole("qc", "admin", "engineer", "supervisor"), (req, res) => {
+router.post("/analytics/dismiss-alert", attachRole, requireRole("qc", "admin", "engineer", "supervisor", "qa_manager"), (req, res) => {
   const { measurement_id } = req.body;
   if (!measurement_id) return res.status(400).json({ error: "measurement_id is required" });
   if (!db.prepare("SELECT 1 FROM measurements WHERE id = ?").get(measurement_id)) {
@@ -558,15 +619,61 @@ router.post("/analytics/dismiss-alert", attachRole, requireRole("qc", "admin", "
   res.status(204).send();
 });
 
+// The In-Process re-inspection reminder (see balloon_drawings.
+// reinspect_interval_minutes). The interval comes from the operation's
+// current template revision, so changing it in the template editor also
+// applies to sheets already open. The clock restarts whenever readings are
+// saved -- or the sheet is created or unlocked, so a reopened sheet doesn't
+// start out days overdue.
+const reminderIntervalSql = (alias) => `(SELECT rd.reinspect_interval_minutes FROM balloon_drawings rd
+   WHERE rd.operation_id = ${alias}.operation_id ORDER BY rd.version DESC LIMIT 1)`;
+const lastReadingAtSql = (alias) => `(SELECT strftime('%Y-%m-%dT%H:%M:%SZ', MAX(ra.created_at)) FROM audit_log ra
+   WHERE ra.entity_type = 'inspection' AND ra.entity_id = ${alias}.id
+     AND (ra.action IN ${DATA_ENTRY_ACTIONS} OR ra.action IN ('created', 'unlocked')))`;
+
+// GET /api/inspections/reminders -- the logged-in user's own in-progress
+// In-Process Data Sheets that have a re-inspection reminder set (same
+// "mine" rule as status-lookup: created it, or is the one entering the
+// readings). The app shell polls this and works out what's due itself.
+router.get("/reminders", attachRole, (req, res) => {
+  const rows = db
+    .prepare(
+      `SELECT * FROM (
+         SELECT i.id, i.job_number, p.part_number, c.name AS client_name, o.name AS operation_name,
+                ${reminderIntervalSql("i")} AS interval_minutes,
+                ${lastReadingAtSql("i")} AS last_reading_at
+         FROM inspections i
+         JOIN parts p ON p.id = i.part_id
+         JOIN clients c ON c.id = p.client_id
+         LEFT JOIN operations o ON o.id = i.operation_id
+         WHERE i.status = 'in_progress' AND i.type = 'in_process'
+           AND (i.created_by = @me OR ${performedBySql("i")} = @me)
+       ) WHERE interval_minutes IS NOT NULL AND last_reading_at IS NOT NULL
+       ORDER BY id`
+    )
+    .all({ me: req.user.id });
+  res.json(rows);
+});
+
 function getInspectionDetail(id) {
   const inspection = db
     .prepare(
       `SELECT i.*, p.part_number, p.description AS part_description, p.client_id,
-              c.name AS client_name, o.name AS operation_name, o.scope AS operation_scope
+              c.name AS client_name, o.name AS operation_name, o.scope AS operation_scope,
+              -- The Rev printed in the sheet header, from the drawing revision
+              -- this inspection was created against (so an old sheet keeps
+              -- its own Rev after a new revision is uploaded). NULL -- shown
+              -- as "N/A" -- until a drawing file is attached and its Rev is
+              -- filled in.
+              CASE WHEN d.image_path IS NOT NULL AND TRIM(COALESCE(d.revision_label, '')) <> ''
+                   THEN TRIM(d.revision_label) END AS drawing_rev,
+              CASE WHEN i.type = 'in_process' THEN ${reminderIntervalSql("i")} END AS reinspect_interval_minutes,
+              CASE WHEN i.type = 'in_process' THEN ${lastReadingAtSql("i")} END AS last_reading_at
        FROM inspections i
        JOIN parts p ON p.id = i.part_id
        JOIN clients c ON c.id = p.client_id
        LEFT JOIN operations o ON o.id = i.operation_id
+       LEFT JOIN balloon_drawings d ON d.id = i.drawing_id
        WHERE i.id = ?`
     )
     .get(id);
@@ -607,13 +714,31 @@ function getInspectionDetail(id) {
   // All Find# columns defined on the drawing — independent of whether they
   // have a recorded measurement yet, so the sheet/PDF grid shows every
   // column from the start instead of only ones that already have data.
+  // A retired Find# (deleted from the template after readings existed, see
+  // schema.sql) still shows on a sheet that recorded something in it, or on
+  // a signed sheet from on/before the day it was retired -- so past records
+  // look exactly as they did -- but not on a new or still-blank sheet.
   const points = inspection.drawing_id
     ? db
         .prepare(
-          `SELECT id, balloon_number, max_spec, min_spec, mean_value, decimal_places, is_reference, is_check_column
-           FROM balloon_points WHERE drawing_id = ? ORDER BY sort_order`
+          `SELECT bp.id, bp.balloon_number, bp.max_spec, bp.min_spec, bp.mean_value, bp.decimal_places,
+                  bp.is_reference, bp.is_check_column
+           FROM balloon_points bp
+           WHERE bp.drawing_id = @drawingId
+             AND (bp.retired_at IS NULL
+                  OR EXISTS (SELECT 1 FROM measurements m
+                             WHERE m.inspection_id = @inspectionId AND m.balloon_point_id = bp.id)
+                  OR EXISTS (SELECT 1 FROM inspection_point_summaries s
+                             WHERE s.inspection_id = @inspectionId AND s.balloon_point_id = bp.id)
+                  OR (@status <> 'in_progress' AND date(@date) <= date(bp.retired_at, 'localtime')))
+           ORDER BY bp.sort_order`
         )
-        .all(inspection.drawing_id)
+        .all({
+          drawingId: inspection.drawing_id,
+          inspectionId: inspection.id,
+          status: inspection.status,
+          date: inspection.date,
+        })
     : [];
 
   // The electronic signature that approved/rejected this Data Sheet, if it's
@@ -628,23 +753,55 @@ function getInspectionDetail(id) {
 
   // When this Final Inspection requires an Operator In-Process Data Sheet
   // (see requires_in_process / hasQualifyingInProcess), the printed record
-  // bundles that companion sheet in too, not just a "yes it exists" check --
-  // same part, same WO#/Job# when this one has it (else any WO# for the
-  // part, matching hasQualifyingInProcess's own fallback), preferring a
-  // signed one and the most recent if more than one matches.
-  let linkedInProcess = null;
+  // bundles those companion sheets in too, not just a "yes it exists" check
+  // -- one per required Operator operation (see requiredOperations; e.g.
+  // Bending, DT1 / Plunge, Sizing each get their own), same WO#/Job# when this one has it (else
+  // any WO# for the part, matching hasQualifyingInProcess's own fallback),
+  // preferring a signed one and the most recent if an operation has more
+  // than one. Ordered by operation name, same as OperationsList.jsx. QC's
+  // own In-Process sheets (scope in_process_qc) aren't the Operator's
+  // check, so they're left out; a legacy sheet with no operation counts as
+  // one more group.
+  let linkedInProcesses = [];
+  const required = requiredOperations(inspection);
   if (inspection.type === "final" && inspection.requires_in_process) {
     const jobFilter = inspection.job_number && inspection.job_number.trim() ? "AND ip.job_number = @jobNumber" : "";
-    const linked = db
+    const scopeFilter =
+      required.length > 0
+        ? "AND ip.operation_id IN (SELECT value FROM json_each(@operationIds))"
+        : "AND (o.scope = 'in_process_operator' OR ip.operation_id IS NULL)";
+    linkedInProcesses = db
       .prepare(
-        `SELECT ip.id FROM inspections ip
-         WHERE ip.part_id = @partId AND ip.type = 'in_process' ${jobFilter}
-         ORDER BY (ip.status = 'approved') DESC, ip.date DESC, ip.id DESC
-         LIMIT 1`
+        `SELECT id FROM (
+           SELECT ip.id, o.name AS operation_name,
+                  ROW_NUMBER() OVER (
+                    PARTITION BY ip.operation_id
+                    ORDER BY (ip.status = 'approved') DESC, ip.date DESC, ip.id DESC
+                  ) AS rn
+           FROM inspections ip
+           LEFT JOIN operations o ON o.id = ip.operation_id
+           WHERE ip.part_id = @partId AND ip.type = 'in_process' ${jobFilter}
+             ${scopeFilter}
+         )
+         WHERE rn = 1
+         ORDER BY operation_name IS NULL, operation_name`
       )
-      .get({ partId: inspection.part_id, jobNumber: inspection.job_number || null });
-    if (linked) linkedInProcess = getInspectionDetail(linked.id);
+      .all({
+        partId: inspection.part_id,
+        jobNumber: inspection.job_number || null,
+        operationIds: JSON.stringify(required.map((o) => o.id)),
+      })
+      .map((row) => getInspectionDetail(row.id));
   }
+
+  // The Final header's per-operation "required" checkboxes (InspectionCapture.jsx).
+  const finalExtras =
+    inspection.type === "final"
+      ? {
+          operator_operations: listOperatorOperations.all(inspection.part_id),
+          required_operation_ids: required.map((o) => o.id),
+        }
+      : {};
 
   return {
     ...inspection,
@@ -653,7 +810,8 @@ function getInspectionDetail(id) {
     sampleRows,
     points,
     signature: signature || null,
-    linkedInProcess,
+    linkedInProcesses,
+    ...finalExtras,
   };
 }
 
@@ -842,13 +1000,32 @@ router.put("/:id", attachRole, (req, res) => {
   // never be forced to NULL just because the client didn't send one.
   const fields = [...HEADER_FIELDS, "date"];
 
+  // A Final's per-operation "Operator In-Process Data Sheet required" picks
+  // (see requiredOperations) -- only sent when the part has more than one
+  // Operator operation. Ticking any of them is what turns
+  // requires_in_process on; unticking them all turns it off.
+  const changes = {};
+  let requiredIdsToStore = null;
+  if (existing.type === "final" && req.body.required_operation_ids !== undefined) {
+    const ids = req.body.required_operation_ids;
+    const operatorOps = listOperatorOperations.all(existing.part_id);
+    const nameById = new Map(operatorOps.map((o) => [o.id, o.name]));
+    if (!Array.isArray(ids) || ids.some((id) => !nameById.has(id))) {
+      return res.status(400).json({ error: "required_operation_ids must be Operator In-Process operations on this part" });
+    }
+    requiredIdsToStore = [...new Set(ids)];
+    req.body.requires_in_process = requiredIdsToStore.length > 0 ? 1 : 0;
+    const oldNames = requiredOperations(existing).map((o) => o.name).join(", ");
+    const newNames = operatorOps.filter((o) => requiredIdsToStore.includes(o.id)).map((o) => o.name).join(", ");
+    if (oldNames !== newNames) changes.required_operations = { old: oldNames || null, new: newNames || null };
+  }
+
   // Normalize to 0/1 only when actually sent, so an omitted field still falls
   // through the COALESCE below as "leave it alone" (undefined), not "clear it".
   BOOLEAN_HEADER_FIELDS.forEach((f) => {
     if (req.body[f] !== undefined) req.body[f] = req.body[f] ? 1 : 0;
   });
 
-  const changes = {};
   fields.forEach((f) => {
     if (req.body[f] !== undefined && req.body[f] !== existing[f]) {
       changes[f] = { old: existing[f], new: req.body[f] };
@@ -861,7 +1038,14 @@ router.put("/:id", attachRole, (req, res) => {
     values[f] = req.body[f] ?? null;
   });
 
-  db.prepare(`UPDATE inspections SET ${setClauses}, updated_by = @updated_by WHERE id = @id`).run(values);
+  db.transaction(() => {
+    db.prepare(`UPDATE inspections SET ${setClauses}, updated_by = @updated_by WHERE id = @id`).run(values);
+    if (requiredIdsToStore) {
+      db.prepare("DELETE FROM inspection_required_operations WHERE inspection_id = ?").run(existing.id);
+      const insert = db.prepare("INSERT INTO inspection_required_operations (inspection_id, operation_id) VALUES (?, ?)");
+      requiredIdsToStore.forEach((operationId) => insert.run(existing.id, operationId));
+    }
+  })();
 
   if (Object.keys(changes).length > 0) {
     recordHeaderAudit("inspection", req.params.id, req.user.id, changes);
@@ -1310,8 +1494,12 @@ router.delete("/:id/certs/:certId", attachRole, (req, res) => {
 // QC/admin/supervisor only.
 router.put("/:id/status", attachRole, (req, res) => {
   const { status, signer_name, reason } = req.body;
-  const role = req.user.role;
-  if (role === "operator") {
+  // Any role that signs every sheet wins; otherwise an Operator (alone or
+  // alongside e.g. Quality Analytics) can still sign their own sheets.
+  if (!hasRole(req.user, "qc", "admin", "supervisor", "qa_manager")) {
+    if (!hasRole(req.user, "operator")) {
+      return res.status(403).json({ error: "You don't have permission to sign Data Sheets." });
+    }
     const target = db
       .prepare(
         `SELECT i.type, p.client_id, o.scope AS operation_scope
@@ -1328,8 +1516,6 @@ router.put("/:id/status", attachRole, (req, res) => {
     if (!isAssignedToClient(req.user.id, target.client_id)) {
       return res.status(403).json({ error: "You're not assigned to this customer." });
     }
-  } else if (!["qc", "admin", "supervisor"].includes(role)) {
-    return res.status(403).json({ error: "You don't have permission to sign Data Sheets." });
   }
   if (!["approved", "conditionally_approved", "rejected"].includes(status)) {
     return res.status(400).json({ error: "status must be 'approved', 'conditionally_approved', or 'rejected'" });
@@ -1339,7 +1525,7 @@ router.put("/:id/status", attachRole, (req, res) => {
   }
 
   const existing = db
-    .prepare("SELECT status, inspector, type, part_id, job_number, requires_in_process FROM inspections WHERE id = ?")
+    .prepare("SELECT id, status, inspector, type, part_id, job_number, requires_in_process FROM inspections WHERE id = ?")
     .get(req.params.id);
   if (!existing) return res.status(404).json({ error: "Inspection not found" });
   if (existing.status !== "in_progress") {
@@ -1348,8 +1534,22 @@ router.put("/:id/status", attachRole, (req, res) => {
 
   // The "Operator In-Process Data Sheet required" gate only blocks an actual
   // pass (plain or conditional) -- QC can always reject a part regardless,
-  // since that isn't claiming the in-process check happened.
-  if (status !== "rejected" && existing.type === "final" && existing.requires_in_process) {
+  // since that isn't claiming the in-process check happened. Every required
+  // Operator operation needs its own recorded sheet (see requiredOperations);
+  // a part with no Operator operations falls back to any In-Process sheet.
+  const required = status !== "rejected" ? requiredOperations(existing) : [];
+  if (required.length > 0) {
+    const missing = required.filter((o) => !hasQualifyingInProcess(existing.part_id, existing.job_number, o.id));
+    if (missing.length > 0) {
+      return res.status(409).json({
+        error:
+          `This Final Inspection requires an Operator In-Process Data Sheet for ${missing.map((o) => o.name).join(", ")}` +
+          `, but none has been recorded yet` +
+          (existing.job_number ? ` for WO# ${existing.job_number}` : "") +
+          ".",
+      });
+    }
+  } else if (status !== "rejected" && existing.type === "final" && existing.requires_in_process) {
     if (!hasQualifyingInProcess(existing.part_id, existing.job_number)) {
       return res.status(409).json({
         error:
@@ -1393,7 +1593,7 @@ router.put("/:id/status", attachRole, (req, res) => {
 // audit log and the signatures table, even though getInspectionDetail's
 // "most recent wins" read only ever surfaces the latest one as *the*
 // signature shown on the report.
-router.put("/:id/unlock", attachRole, requireRole("admin", "supervisor"), (req, res) => {
+router.put("/:id/unlock", attachRole, requireRole("admin", "supervisor", "qa_manager"), (req, res) => {
   const inspection = db.prepare("SELECT status FROM inspections WHERE id = ?").get(req.params.id);
   if (!inspection) return res.status(404).json({ error: "Inspection not found" });
   if (inspection.status === "in_progress") {
@@ -1417,10 +1617,10 @@ router.put("/:id/unlock", attachRole, requireRole("admin", "supervisor"), (req, 
 // nothing ever recorded): QC can discard any of those, and an Operator can
 // discard their own Operator In-Process ones for an assigned customer.
 router.delete("/:id", attachRole, (req, res) => {
-  const role = req.user.role;
   const target = db
     .prepare(
-      `SELECT i.id, i.type, p.client_id, o.scope AS operation_scope, ${IS_BLANK_SQL} AS is_blank
+      `SELECT i.id, i.type, p.client_id, o.scope AS operation_scope, ${IS_BLANK_SQL} AS is_blank,
+              p.part_number, i.job_number, i.po_number, i.date, o.name AS operation_name
        FROM inspections i
        JOIN parts p ON p.id = i.part_id
        LEFT JOIN operations o ON o.id = i.operation_id
@@ -1429,16 +1629,19 @@ router.delete("/:id", attachRole, (req, res) => {
     .get(req.params.id);
   if (!target) return res.status(404).json({ error: "Inspection not found" });
 
-  if (!["admin", "supervisor"].includes(role)) {
-    if (role === "operator") {
+  // Checked against every role the user holds (see lib/roles.js): the most
+  // permissive one that applies wins.
+  if (!hasRole(req.user, "admin", "supervisor", "qa_manager")) {
+    if (!hasRole(req.user, "qc")) {
+      if (!hasRole(req.user, "operator")) {
+        return res.status(403).json({ error: "You don't have permission to delete Data Sheets." });
+      }
       if (target.type !== "in_process" || target.operation_scope !== "in_process_operator") {
         return res.status(403).json({ error: "Operators can only discard their own In-Process Data Sheets." });
       }
       if (!isAssignedToClient(req.user.id, target.client_id)) {
         return res.status(403).json({ error: "You're not assigned to this customer." });
       }
-    } else if (role !== "qc") {
-      return res.status(403).json({ error: "You don't have permission to delete Data Sheets." });
     }
     if (!target.is_blank) {
       return res.status(409).json({
@@ -1448,9 +1651,25 @@ router.delete("/:id", attachRole, (req, res) => {
     }
   }
 
-  // Leaves a trace in audit_log (keyed to the now-gone id) of who removed it.
-  recordAudit("inspection", target.id, "deleted", req.user.id, { blank: !!target.is_blank, type: target.type });
-  db.prepare("DELETE FROM inspections WHERE id = ?").run(target.id);
+  db.transaction(() => {
+    // A sheet with anything recorded goes to Recently Deleted first, so an
+    // accidental delete can be undone (lib/trash.js). A blank one being
+    // discarded has nothing worth recovering, so it isn't kept.
+    if (!target.is_blank) {
+      const label = [
+        `${TRASH_TYPE_LABELS[target.type] ?? target.type} Data Sheet — ${target.part_number}`,
+        target.operation_name,
+        target.job_number ? `WO# ${target.job_number}` : target.po_number ? `PO# ${target.po_number}` : null,
+        String(target.date || "").slice(0, 10),
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      archiveInspection(db, target.id, label, req.user.id);
+    }
+    // Leaves a trace in audit_log (keyed to the now-gone id) of who removed it.
+    recordAudit("inspection", target.id, "deleted", req.user.id, { blank: !!target.is_blank, type: target.type });
+    db.prepare("DELETE FROM inspections WHERE id = ?").run(target.id);
+  })();
   res.status(204).send();
 });
 
@@ -1467,4 +1686,34 @@ router.get("/:id/pdf", attachRole, (req, res) => {
   generateInspectionPdf(res, inspection);
 });
 
+// GET /api/inspections/:id/xlsx  (same Data Sheet as the PDF, as an Excel file)
+router.get("/:id/xlsx", attachRole, async (req, res) => {
+  const inspection = getInspectionDetail(req.params.id);
+  if (!inspection) return res.status(404).json({ error: "Inspection not found" });
+  if (req.user.role === "operator" && !isAssignedToClient(req.user.id, inspection.client_id)) {
+    return res.status(403).json({ error: "You're not assigned to this customer." });
+  }
+
+  try {
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", `attachment; filename="inspection-${inspection.id}.xlsx"`);
+    await generateInspectionXlsx(res, inspection);
+    res.end();
+  } catch (e) {
+    console.error("Excel export failed for inspection", inspection.id, e);
+    // Nothing streamed yet -> a normal JSON error; mid-stream -> cut it off
+    // so the browser sees a failed download, not a corrupt file.
+    if (!res.headersSent) {
+      res.removeHeader("Content-Disposition");
+      res.status(500).json({ error: "Couldn't generate the Excel file" });
+    } else {
+      res.destroy(e);
+    }
+  }
+});
+
 module.exports = router;
+
+// Shared with routes/inspectorAnalytics.js, which flags each sheet from the
+// same detail the sheet view and PDF render.
+module.exports.getInspectionDetail = getInspectionDetail;

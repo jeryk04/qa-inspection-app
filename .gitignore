@@ -13,6 +13,8 @@ backend/uploads/*
 backend/server.log
 backend/server.pid
 backend/certs/
+# Source data dropped in for one-off imports (e.g. the Access material list)
+backend/import/
 
 # Frontend
 frontend/dist/

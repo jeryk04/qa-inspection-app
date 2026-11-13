@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useSearchParams } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
+import { hasAnyRole } from "../lib/roles";
 import { api } from "../api/client";
 import { greeting, timeAgo, ROLE_LABELS, resultLabel, typeLabel, orderRefLabel } from "../lib/format";
 import TrendLine from "../components/charts/TrendLine";
@@ -166,8 +167,16 @@ function parseDbTime(value) {
   return new Date(String(value).replace(" ", "T") + "Z");
 }
 
-function activityDayLabel(value) {
-  const d = parseDbTime(value);
+// The day an activity row is filed under -- the server's local `day`
+// (normally the signing day, but a corrected sheet's own Data Sheet date,
+// see GET /recent-activity), falling back to the signing time.
+function activityDay(a) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(a.day || "");
+  return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : parseDbTime(a.at);
+}
+
+function activityDayLabel(a) {
+  const d = activityDay(a);
   if (Number.isNaN(d.getTime())) return "";
   const startOfDay = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
   const days = Math.round((startOfDay(new Date()) - startOfDay(d)) / 86400000);
@@ -266,7 +275,7 @@ function RecentActivity({ baseParams = {}, showTypeFilter = true, storageKey = "
 
   const groups = [];
   items.forEach((a) => {
-    const label = activityDayLabel(a.at);
+    const label = activityDayLabel(a);
     const last = groups[groups.length - 1];
     if (last && last.label === label) last.items.push(a);
     else groups.push({ label, items: [a] });
@@ -380,9 +389,18 @@ function RecentActivity({ baseParams = {}, showTypeFilter = true, storageKey = "
                       >
                         {ACTIVITY_BADGE[result] ?? result}
                       </span>
-                      <span className="activity-time muted" title={parseDbTime(a.at).toLocaleString()}>
-                        {activityTime(a.at, group.label === "Today")}
-                      </span>
+                      {a.corrected ? (
+                        <span
+                          className="activity-time muted"
+                          title={`Unlocked to fix and signed again ${parseDbTime(a.at).toLocaleString()}`}
+                        >
+                          Corrected
+                        </span>
+                      ) : (
+                        <span className="activity-time muted" title={parseDbTime(a.at).toLocaleString()}>
+                          {activityTime(a.at, group.label === "Today")}
+                        </span>
+                      )}
                     </li>
                   );
                 })}
@@ -401,11 +419,22 @@ function RecentActivity({ baseParams = {}, showTypeFilter = true, storageKey = "
 }
 
 function QcHome() {
+  const { user } = useAuth();
   return (
     <>
-      <DashboardHero title="Select Inspection Type" roleView="qc" />
+      <DashboardHero title="Select Inspection Type" roleView={user?.role === "qa_manager" ? "qa_manager" : "qc"} />
       <div className="page">
         <div className="type-grid">
+          {/* A QA Manager lands here too (Supervisor-level QC access) -- plus
+              their own Inspector Performance entry point. */}
+          {hasAnyRole(user, ["qa_manager"]) && (
+            <Link to="/team-performance" className="type-card">
+              <span className="type-card-icon">
+                <TypeIcon name="chart" />
+              </span>
+              <strong>Inspector Performance</strong>
+            </Link>
+          )}
           {INSPECTION_TYPES.map((t) =>
             t.enabled ? (
               <Link key={t.key} to={t.to} className="type-card">

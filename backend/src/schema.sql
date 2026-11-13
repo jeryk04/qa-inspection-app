@@ -6,12 +6,21 @@ CREATE TABLE IF NOT EXISTS users (
   username              TEXT NOT NULL UNIQUE,
   password_hash         TEXT NOT NULL,
   full_name             TEXT NOT NULL,
-  role                  TEXT NOT NULL DEFAULT 'qc' CHECK (role IN ('operator','engineer','qc','supervisor','admin')),
+  role                  TEXT NOT NULL DEFAULT 'qc' CHECK (role IN ('operator','engineer','qc','supervisor','qa_manager','admin')),
   active                INTEGER NOT NULL DEFAULT 1,
   must_change_password  INTEGER NOT NULL DEFAULT 0,
   last_login            TEXT,
   email                 TEXT,
   created_at            TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Additional roles beyond users.role -- a user gets the combined
+-- permissions of their main role and every role here (e.g. an Operator who
+-- also does QC work). See backend/src/lib/roles.js.
+CREATE TABLE IF NOT EXISTS user_roles (
+  user_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  role      TEXT NOT NULL CHECK (role IN ('operator','engineer','qc','supervisor','qa_manager','admin')),
+  PRIMARY KEY (user_id, role)
 );
 
 CREATE TABLE IF NOT EXISTS clients (
@@ -86,6 +95,12 @@ CREATE TABLE IF NOT EXISTS balloon_drawings (
   -- row is its own check event (its own qty and note), not one piece. See
   -- inspection_sample_rows below.
   machine_log_mode INTEGER NOT NULL DEFAULT 0,
+  -- In-Process only: re-inspection reminder interval in minutes (NULL =
+  -- off). Read live from the template, never copied onto the sheet --
+  -- while a Data Sheet on this template is in_progress, its inspector is
+  -- reminded once this long has passed since the last reading was saved
+  -- (see GET /api/inspections/reminders). Signed sheets never remind.
+  reinspect_interval_minutes INTEGER,
   created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -119,6 +134,12 @@ CREATE TABLE IF NOT EXISTS balloon_points (
   -- anyway), and every place that shows the spec wraps it in parentheses.
   -- Set by typing the parentheses in the Data Sheet Template.
   is_reference      INTEGER NOT NULL DEFAULT 0,
+  -- Set when a Find# that already has recorded readings is deleted from the
+  -- template: it can't be hard-deleted without breaking past Data Sheets, so
+  -- it's hidden from the template and from new inspections instead, while
+  -- past inspections keep showing it (see getInspectionDetail's points
+  -- query). NULL = active. Points with no readings are still hard-deleted.
+  retired_at        TEXT,
   UNIQUE(drawing_id, balloon_number)
 );
 
@@ -232,6 +253,18 @@ CREATE TABLE IF NOT EXISTS inspection_certs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_inspection_certs_inspection ON inspection_certs(inspection_id);
+
+-- Which of the part's Operator In-Process operations (operations.scope =
+-- 'in_process_operator') a Final Inspection requires a sheet for -- picked
+-- per operation on the Final's header when the part has more than one. No
+-- rows while requires_in_process = 1 means "every Operator operation on the
+-- part" (single-operation parts, and Finals from before this existed). See
+-- requiredOperationIds in routes/inspections.js.
+CREATE TABLE IF NOT EXISTS inspection_required_operations (
+  inspection_id INTEGER NOT NULL REFERENCES inspections(id) ON DELETE CASCADE,
+  operation_id  INTEGER NOT NULL REFERENCES operations(id) ON DELETE CASCADE,
+  PRIMARY KEY (inspection_id, operation_id)
+);
 
 -- One row per meaningful action on a record (created / header_updated /
 -- measurements_saved / status_changed) for ISO-style traceability of who

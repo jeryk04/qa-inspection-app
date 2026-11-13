@@ -2,16 +2,17 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
 import { useAuth } from "../context/AuthContext";
+import { hasAnyRole } from "../lib/roles";
 import { useConfirm } from "../hooks/useConfirm";
 import PageNav from "../components/PageNav";
 
-const CAN_CREATE_ROLES = ["qc", "admin", "engineer", "supervisor"];
+const CAN_CREATE_ROLES = ["qc", "admin", "engineer", "supervisor", "qa_manager"];
 // Delete is more destructive than rename/create, so it's held to the
 // tighter qc/admin bar used everywhere else (parts, drawings) -- an engineer
 // can still set up and rename operations, just not remove one. This deletes
 // the operation itself, not an inspection -- unlike inspections.js's DELETE
 // /:id, qc keeps access here.
-const CAN_DELETE_ROLES = ["qc", "admin", "supervisor"];
+const CAN_DELETE_ROLES = ["qc", "admin", "supervisor", "qa_manager"];
 
 // Set-up, the Operator's In-Process, QC's own separate In-Process, and
 // Samples each have their own fully independent operations + Data Sheet
@@ -57,6 +58,10 @@ export default function OperationsList() {
   const [searchParams] = useSearchParams();
   const type = searchParams.get("type") || "in_process";
   const { user, effectiveRole } = useAuth();
+  // ?scope=in_process_operator lets QC/admin open the Operator's In-Process
+  // list (to set up its templates, e.g. from Browse Customers' PartSetup.jsx)
+  // -- ignored for an Operator, who only ever has their own list.
+  const requestedScope = searchParams.get("scope");
   const scope =
     type === "setup"
       ? "setup"
@@ -64,10 +69,12 @@ export default function OperationsList() {
         ? "samples"
         : effectiveRole === "operator"
           ? "in_process_operator"
-          : "in_process_qc";
+          : requestedScope === "in_process_operator"
+            ? "in_process_operator"
+            : "in_process_qc";
   const scopeLabel = SCOPE_LABELS[scope];
-  const canCreate = CAN_CREATE_ROLES.includes(user?.role);
-  const canDelete = CAN_DELETE_ROLES.includes(user?.role);
+  const canCreate = hasAnyRole(user, CAN_CREATE_ROLES);
+  const canDelete = hasAnyRole(user, CAN_DELETE_ROLES);
 
   const [part, setPart] = useState(null);
   const [clientName, setClientName] = useState(null);

@@ -46,13 +46,14 @@ router.get("/", (req, res) => {
   res.json(drawings);
 });
 
-// GET /api/drawings/:id  (includes its points)
+// GET /api/drawings/:id  (includes its active points -- retired ones are only
+// shown on the past inspections that used them, see getInspectionDetail)
 router.get("/:id", (req, res) => {
   const drawing = db.prepare("SELECT * FROM balloon_drawings WHERE id = ?").get(req.params.id);
   if (!drawing) return res.status(404).json({ error: "Drawing not found" });
 
   const points = db
-    .prepare("SELECT * FROM balloon_points WHERE drawing_id = ? ORDER BY sort_order")
+    .prepare("SELECT * FROM balloon_points WHERE drawing_id = ? AND retired_at IS NULL ORDER BY sort_order")
     .all(req.params.id);
 
   res.json({ ...drawing, points });
@@ -119,7 +120,9 @@ const getPriorOperationDrawing = db.prepare(
 const insertDrawing = db.prepare(
   "INSERT INTO balloon_drawings (part_id, image_path, version, revision_label, operation_id) VALUES (?, ?, ?, ?, ?)"
 );
-const getPointsForDrawing = db.prepare("SELECT * FROM balloon_points WHERE drawing_id = ? ORDER BY sort_order");
+const getPointsForDrawing = db.prepare(
+  "SELECT * FROM balloon_points WHERE drawing_id = ? AND retired_at IS NULL ORDER BY sort_order"
+);
 const insertPoint = db.prepare(`
   INSERT INTO balloon_points
     (drawing_id, balloon_number, max_spec, min_spec, mean_value, sort_order, decimal_places, is_check_column, is_reference)
@@ -143,7 +146,7 @@ const insertPoint = db.prepare(`
 // decimal_places, new drawing_id) so it starts as an editable copy rather
 // than empty -- unless there is no prior version, in which case it starts
 // empty exactly as before.
-router.post("/", attachRole, requireRole("qc", "admin", "engineer", "supervisor"), upload.single("image"), (req, res) => {
+router.post("/", attachRole, requireRole("qc", "admin", "engineer", "supervisor", "qa_manager"), upload.single("image"), (req, res) => {
   const { version, revision_label } = req.body;
   let { part_id, operation_id } = req.body;
 
@@ -175,6 +178,10 @@ router.post("/", attachRole, requireRole("qc", "admin", "engineer", "supervisor"
     const newDrawingId = result.lastInsertRowid;
 
     if (priorDrawing) {
+      // A new revision of the same operation keeps its reminder schedule.
+      db.prepare(
+        "UPDATE balloon_drawings SET reinspect_interval_minutes = (SELECT reinspect_interval_minutes FROM balloon_drawings WHERE id = ?) WHERE id = ?"
+      ).run(priorDrawing.id, newDrawingId);
       for (const p of getPointsForDrawing.all(priorDrawing.id)) {
         insertPoint.run({
           drawing_id: newDrawingId,
@@ -200,8 +207,8 @@ router.post("/", attachRole, requireRole("qc", "admin", "engineer", "supervisor"
 // PUT /api/drawings/:id  (edit the free-text revision label printed on the
 // drawing's title block -- independent from the auto-incrementing version
 // number used for "latest" ordering)
-router.put("/:id", attachRole, requireRole("qc", "admin", "engineer", "supervisor"), (req, res) => {
-  const { revision_label, hundred_percent_inspection, machine_log_mode } = req.body;
+router.put("/:id", attachRole, requireRole("qc", "admin", "engineer", "supervisor", "qa_manager"), (req, res) => {
+  const { revision_label, hundred_percent_inspection, machine_log_mode, reinspect_interval_minutes } = req.body;
   // Built field-by-field (not a blanket COALESCE) since revision_label's own
   // "clear it" gesture is an empty string -- which needs to actually write
   // null, not fall through to "leave it alone" the way an omitted field does.
@@ -218,6 +225,16 @@ router.put("/:id", attachRole, requireRole("qc", "admin", "engineer", "superviso
   if (machine_log_mode !== undefined) {
     setClauses.push("machine_log_mode = ?");
     params.push(machine_log_mode ? 1 : 0);
+  }
+  // null/"" turns the reminder off; otherwise whole minutes, up to 24h.
+  if (reinspect_interval_minutes !== undefined) {
+    const off = reinspect_interval_minutes === null || reinspect_interval_minutes === "";
+    const minutes = Number(reinspect_interval_minutes);
+    if (!off && (!Number.isInteger(minutes) || minutes < 1 || minutes > 1440)) {
+      return res.status(400).json({ error: "The re-inspection reminder must be between 1 minute and 24 hours." });
+    }
+    setClauses.push("reinspect_interval_minutes = ?");
+    params.push(off ? null : minutes);
   }
   if (setClauses.length > 0) {
     params.push(req.params.id);
@@ -240,14 +257,14 @@ router.put("/:id", attachRole, requireRole("qc", "admin", "engineer", "superviso
   // this returns as its current `drawing` state, and expects .points to
   // always be an array there.
   const points = db
-    .prepare("SELECT * FROM balloon_points WHERE drawing_id = ? ORDER BY sort_order")
+    .prepare("SELECT * FROM balloon_points WHERE drawing_id = ? AND retired_at IS NULL ORDER BY sort_order")
     .all(req.params.id);
   res.json({ ...drawing, points });
 });
 
 // DELETE /api/drawings/:id  (cascades to its balloon_points; blocked if any point
 // already has recorded measurements, to protect quality records from deletion)
-router.delete("/:id", attachRole, requireRole("qc", "admin", "supervisor"), (req, res) => {
+router.delete("/:id", attachRole, requireRole("qc", "admin", "supervisor", "qa_manager"), (req, res) => {
   try {
     const result = db.prepare("DELETE FROM balloon_drawings WHERE id = ?").run(req.params.id);
     if (result.changes === 0) return res.status(404).json({ error: "Drawing not found" });
@@ -265,7 +282,7 @@ router.delete("/:id", attachRole, requireRole("qc", "admin", "supervisor"), (req
 
 // POST /api/drawings/:id/points  (adds a point with its specification, appended
 // to the end of the column order)
-router.post("/:id/points", attachRole, requireRole("qc", "admin", "engineer", "supervisor"), (req, res) => {
+router.post("/:id/points", attachRole, requireRole("qc", "admin", "engineer", "supervisor", "qa_manager"), (req, res) => {
   const { balloon_number, max_spec, min_spec, mean_value, decimal_places, is_check_column, is_reference } = req.body;
   if (!balloon_number) return res.status(400).json({ error: "balloon_number is required" });
 
@@ -274,30 +291,66 @@ router.post("/:id/points", attachRole, requireRole("qc", "admin", "engineer", "s
     .get(req.params.id);
   const nextOrder = maxOrder == null ? 0 : maxOrder + 1;
 
-  const result = db
-    .prepare(
-      `INSERT INTO balloon_points
-       (drawing_id, balloon_number, max_spec, min_spec, mean_value, sort_order, decimal_places, is_check_column, is_reference)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    )
-    .run(
-      req.params.id,
-      balloon_number,
-      max_spec ?? null,
-      min_spec ?? null,
-      mean_value ?? null,
-      nextOrder,
-      clampDecimalPlaces(decimal_places),
-      is_check_column ? 1 : 0,
-      is_reference ? 1 : 0
-    );
+  let result;
+  try {
+    result = db
+      .prepare(
+        `INSERT INTO balloon_points
+         (drawing_id, balloon_number, max_spec, min_spec, mean_value, sort_order, decimal_places, is_check_column, is_reference)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        req.params.id,
+        balloon_number,
+        max_spec ?? null,
+        min_spec ?? null,
+        mean_value ?? null,
+        nextOrder,
+        clampDecimalPlaces(decimal_places),
+        is_check_column ? 1 : 0,
+        is_reference ? 1 : 0
+      );
+  } catch (err) {
+    if (err.code === "SQLITE_CONSTRAINT_UNIQUE") {
+      return res.status(409).json({ error: duplicateFindMessage(req.params.id, balloon_number) });
+    }
+    throw err;
+  }
 
   const point = db.prepare("SELECT * FROM balloon_points WHERE id = ?").get(result.lastInsertRowid);
   res.status(201).json(point);
 });
 
+// PUT /api/drawings/:id/points/order  (body: { point_ids: [...] } -- every
+// active point on the drawing, in its new column order). Retired points keep
+// their sort_order; they only ever show on past sheets anyway.
+router.put("/:id/points/order", attachRole, requireRole("qc", "admin", "engineer", "supervisor", "qa_manager"), (req, res) => {
+  const ids = req.body.point_ids;
+  if (!Array.isArray(ids)) return res.status(400).json({ error: "point_ids must be an array" });
+
+  const active = db
+    .prepare("SELECT id FROM balloon_points WHERE drawing_id = ? AND retired_at IS NULL")
+    .all(req.params.id)
+    .map((p) => p.id);
+  const given = new Set(ids.map(Number));
+  if (given.size !== ids.length || given.size !== active.length || !active.every((id) => given.has(id))) {
+    return res.status(409).json({
+      error: "This template's Find# columns changed since the page was loaded. Reload the page and try again.",
+    });
+  }
+
+  const setOrder = db.prepare("UPDATE balloon_points SET sort_order = ? WHERE id = ?");
+  db.transaction(() => ids.forEach((id, index) => setOrder.run(index, id)))();
+
+  res.json(
+    db
+      .prepare("SELECT * FROM balloon_points WHERE drawing_id = ? AND retired_at IS NULL ORDER BY sort_order")
+      .all(req.params.id)
+  );
+});
+
 // PUT /api/drawings/points/:id  (edit an existing point's Find#, spec, or decimal places)
-router.put("/points/:id", attachRole, requireRole("qc", "admin", "engineer", "supervisor"), (req, res) => {
+router.put("/points/:id", attachRole, requireRole("qc", "admin", "engineer", "supervisor", "qa_manager"), (req, res) => {
   const { balloon_number, max_spec, min_spec, mean_value, decimal_places, is_check_column, is_reference } = req.body;
   if (!balloon_number) return res.status(400).json({ error: "balloon_number is required" });
 
@@ -306,7 +359,7 @@ router.put("/points/:id", attachRole, requireRole("qc", "admin", "engineer", "su
 
   // Saving the new spec and re-checking every existing reading against it
   // happen together -- see recomputePointTolerance for why.
-  const changed = db.transaction(() => {
+  const save = db.transaction(() => {
     db.prepare(
       `UPDATE balloon_points
        SET balloon_number = ?, max_spec = ?, min_spec = ?, mean_value = ?, decimal_places = ?, is_check_column = ?,
@@ -324,7 +377,16 @@ router.put("/points/:id", attachRole, requireRole("qc", "admin", "engineer", "su
     );
     const point = db.prepare("SELECT * FROM balloon_points WHERE id = ?").get(req.params.id);
     return recomputePointTolerance(db, point);
-  })();
+  });
+  let changed;
+  try {
+    changed = save();
+  } catch (err) {
+    if (err.code === "SQLITE_CONSTRAINT_UNIQUE") {
+      return res.status(409).json({ error: duplicateFindMessage(before.drawing_id, balloon_number) });
+    }
+    throw err;
+  }
 
   // A spec change that flipped any pass/fail result is logged on each affected
   // Data Sheet's History, with the old and new spec, so it's traceable.
@@ -350,20 +412,32 @@ router.put("/points/:id", attachRole, requireRole("qc", "admin", "engineer", "su
   res.json(db.prepare("SELECT * FROM balloon_points WHERE id = ?").get(req.params.id));
 });
 
-// DELETE /api/drawings/points/:id  (blocked if measurements already reference it)
-router.delete("/points/:id", attachRole, requireRole("qc", "admin", "supervisor"), (req, res) => {
+// DELETE /api/drawings/points/:id  (hard-deletes a point nothing has recorded
+// against yet; one that already has readings is retired instead -- gone from
+// the template and from new inspections, but still shown on the past
+// inspections that recorded it, see retired_at in schema.sql)
+router.delete("/points/:id", attachRole, requireRole("qc", "admin", "supervisor", "qa_manager"), (req, res) => {
+  const point = db.prepare("SELECT id FROM balloon_points WHERE id = ? AND retired_at IS NULL").get(req.params.id);
+  if (!point) return res.status(404).json({ error: "Point not found" });
   try {
-    const result = db.prepare("DELETE FROM balloon_points WHERE id = ?").run(req.params.id);
-    if (result.changes === 0) return res.status(404).json({ error: "Point not found" });
-    res.status(204).send();
+    db.prepare("DELETE FROM balloon_points WHERE id = ?").run(point.id);
   } catch (err) {
-    if (err.code === "SQLITE_CONSTRAINT_FOREIGNKEY" || err.code === "SQLITE_CONSTRAINT_TRIGGER") {
-      return res.status(409).json({
-        error: "This point can't be deleted because it already has recorded measurements.",
-      });
-    }
-    throw err;
+    if (err.code !== "SQLITE_CONSTRAINT_FOREIGNKEY" && err.code !== "SQLITE_CONSTRAINT_TRIGGER") throw err;
+    db.prepare("UPDATE balloon_points SET retired_at = datetime('now') WHERE id = ?").run(point.id);
   }
+  res.status(204).send();
 });
+
+// UNIQUE(drawing_id, balloon_number) still covers retired points, so a
+// retired Find#'s label can't be reused on the same revision -- explains
+// that instead of a bare constraint error.
+function duplicateFindMessage(drawingId, balloonNumber) {
+  const retired = db
+    .prepare("SELECT 1 FROM balloon_points WHERE drawing_id = ? AND balloon_number = ? AND retired_at IS NOT NULL")
+    .get(drawingId, balloonNumber);
+  return retired
+    ? `Find# ${balloonNumber} was deleted from this template but is kept on past inspections, so it can't be reused on this revision. Use a different Find#, or upload a new revision.`
+    : `Find# ${balloonNumber} already exists on this template.`;
+}
 
 module.exports = router;

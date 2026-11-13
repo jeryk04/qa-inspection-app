@@ -187,6 +187,35 @@ if (!usersColumnsForEmail.some((c) => c.name === "email")) {
   db.exec("ALTER TABLE users ADD COLUMN email TEXT");
 }
 
+// qa_manager: Supervisor's access everywhere, plus the Inspector Performance
+// analytics (routes/inspectorAnalytics.js) no other role but admin sees.
+// Same table rebuild as the supervisor migration above (a CHECK can't be
+// ALTERed); every row keeps its id, so all users(id) references still hold.
+const usersTableSqlForQaManager =
+  db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'users'").get()?.sql || "";
+if (!usersTableSqlForQaManager.includes("qa_manager")) {
+  db.exec(`
+    PRAGMA foreign_keys = OFF;
+    CREATE TABLE users_new (
+      id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+      username              TEXT NOT NULL UNIQUE,
+      password_hash         TEXT NOT NULL,
+      full_name             TEXT NOT NULL,
+      role                  TEXT NOT NULL DEFAULT 'qc' CHECK (role IN ('operator','engineer','qc','supervisor','qa_manager','admin')),
+      active                INTEGER NOT NULL DEFAULT 1,
+      must_change_password  INTEGER NOT NULL DEFAULT 0,
+      last_login            TEXT,
+      email                 TEXT,
+      created_at            TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    INSERT INTO users_new (id, username, password_hash, full_name, role, active, must_change_password, last_login, email, created_at)
+      SELECT id, username, password_hash, full_name, role, active, must_change_password, last_login, email, created_at FROM users;
+    DROP TABLE users;
+    ALTER TABLE users_new RENAME TO users;
+    PRAGMA foreign_keys = ON;
+  `);
+}
+
 // is_check_column: explicit flag for whether a Find# column captures as a
 // pass/fail OK/Not-OK check instead of a numeric measurement, decoupled from
 // whether it happens to have Max/Mean/Min spec values recorded (a check
@@ -211,6 +240,12 @@ if (!balloonPointsColumns.some((c) => c.name === "is_reference")) {
   db.exec("ALTER TABLE balloon_points ADD COLUMN is_reference INTEGER NOT NULL DEFAULT 0");
 }
 
+// retired_at: soft-delete for a Find# that already has readings (see
+// schema.sql). NULL for every existing point -- nothing was retired before.
+if (!balloonPointsColumns.some((c) => c.name === "retired_at")) {
+  db.exec("ALTER TABLE balloon_points ADD COLUMN retired_at TEXT");
+}
+
 // machine_log_mode: In-Process only, same template->inspection inheritance
 // as hundred_percent_inspection (see schema.sql). Defaults to 0/off for
 // every existing drawing and inspection -- nothing changes for anyone not
@@ -222,6 +257,12 @@ if (!balloonDrawingsColumnsForMachineLog.some((c) => c.name === "machine_log_mod
 const inspectionsColumnsForMachineLog = db.prepare("PRAGMA table_info(inspections)").all();
 if (!inspectionsColumnsForMachineLog.some((c) => c.name === "machine_log_mode")) {
   db.exec("ALTER TABLE inspections ADD COLUMN machine_log_mode INTEGER NOT NULL DEFAULT 0");
+}
+
+// reinspect_interval_minutes: In-Process re-inspection reminder (see
+// schema.sql). NULL/off for every existing template.
+if (!db.prepare("PRAGMA table_info(balloon_drawings)").all().some((c) => c.name === "reinspect_interval_minutes")) {
+  db.exec("ALTER TABLE balloon_drawings ADD COLUMN reinspect_interval_minutes INTEGER");
 }
 
 // A third, separate scope split: 'samples' -- a new, fully independent
