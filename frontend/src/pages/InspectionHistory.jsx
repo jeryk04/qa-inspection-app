@@ -8,14 +8,18 @@ import PageNav from "../components/PageNav";
 import { resultStatus, resultLabel, formatDate, orderRefLabel } from "../lib/format";
 
 // Matches backend/src/routes/inspections.js's requireRole("admin",
-// "supervisor", "qa_manager") on both DELETE /:id and PUT /:id/unlock, and the same list
-// in Inspections.jsx/OperationDetail.jsx's own guards for the same actions.
+// "supervisor", "qa_manager") on DELETE /:id, and the same list in
+// Inspections.jsx/OperationDetail.jsx's own guards for it. PUT /:id/unlock
+// also lets QC reopen a sheet they signed themselves (signed_by_id), so QC
+// gets the right-click menu on those rows, with Unlock only.
 const CAN_MANAGE_ROLES = ["admin", "supervisor", "qa_manager"];
 
 export default function InspectionHistory() {
   const navigate = useNavigate();
   const { user } = useAuth();
   const canManage = hasAnyRole(user, CAN_MANAGE_ROLES);
+  const isQc = hasAnyRole(user, ["qc"]);
+  const canUnlockRow = (i) => i.status !== "in_progress" && (canManage || (isQc && i.signed_by_id === user?.id));
   const [contextMenu, setContextMenu] = useState(null); // { inspection, x, y }
   const [confirm, confirmDialog] = useConfirm();
   const [clients, setClients] = useState([]);
@@ -173,6 +177,9 @@ export default function InspectionHistory() {
       {canManage && !loading && (
         <p className="muted">Right-click an inspection to delete it, or to reopen a signed one for editing.</p>
       )}
+      {!canManage && isQc && !loading && (
+        <p className="muted">Right-click an inspection you signed to reopen it for editing.</p>
+      )}
       {loading ? (
         <p>Loading...</p>
       ) : (
@@ -191,7 +198,10 @@ export default function InspectionHistory() {
           </thead>
           <tbody>
             {inspections.map((i) => (
-              <tr key={i.id} onContextMenu={canManage ? (e) => handleContextMenu(e, i) : undefined}>
+              <tr
+                key={i.id}
+                onContextMenu={canManage || canUnlockRow(i) ? (e) => handleContextMenu(e, i) : undefined}
+              >
                 <td>{i.client_name}</td>
                 <td>{i.part_number}</td>
                 <td>{orderRefLabel(i) ?? "—"}</td>
@@ -221,12 +231,14 @@ export default function InspectionHistory() {
 
       {contextMenu && (
         <ul className="context-menu" style={{ top: contextMenu.y, left: contextMenu.x }}>
-          {contextMenu.inspection.status !== "in_progress" && (
+          {canUnlockRow(contextMenu.inspection) && (
             <li onClick={() => handleUnlock(contextMenu.inspection)}>Unlock for editing</li>
           )}
-          <li className="context-menu-danger" onClick={() => handleDelete(contextMenu.inspection)}>
-            Delete
-          </li>
+          {canManage && (
+            <li className="context-menu-danger" onClick={() => handleDelete(contextMenu.inspection)}>
+              Delete
+            </li>
+          )}
         </ul>
       )}
       {confirmDialog}

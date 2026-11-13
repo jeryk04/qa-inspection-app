@@ -200,7 +200,10 @@ router.get("/", (req, res) => {
   let query = `
     SELECT i.*, p.part_number, p.client_id, c.name AS client_name, u.full_name AS created_by_name,
            pb.full_name AS performed_by_name,
-           ${IS_BLANK_SQL} AS is_blank
+           ${IS_BLANK_SQL} AS is_blank,
+           -- latest signer, for who may unlock it (see PUT /:id/unlock)
+           (SELECT s.user_id FROM signatures s WHERE s.inspection_id = i.id
+            ORDER BY s.signed_at DESC, s.id DESC LIMIT 1) AS signed_by_id
     FROM inspections i
     JOIN parts p ON p.id = i.part_id
     JOIN clients c ON c.id = p.client_id
@@ -745,9 +748,9 @@ function getInspectionDetail(id) {
   // been signed — used by both the on-screen report and the PDF export.
   const signature = db
     .prepare(
-      `SELECT s.action, s.signed_at, u.full_name
+      `SELECT s.action, s.signed_at, s.user_id, u.full_name
        FROM signatures s JOIN users u ON u.id = s.user_id
-       WHERE s.inspection_id = ? ORDER BY s.signed_at DESC LIMIT 1`
+       WHERE s.inspection_id = ? ORDER BY s.signed_at DESC, s.id DESC LIMIT 1`
     )
     .get(id);
 
@@ -1581,10 +1584,11 @@ router.put("/:id/status", attachRole, (req, res) => {
 });
 
 // PUT /api/inspections/:id/unlock  (reopens an already-signed Data Sheet for
-// editing by setting status back to in_progress) -- same admin/supervisor
-// restriction as DELETE /:id below, since this is the non-destructive
-// alternative to it: instead of erasing a signed sheet that turns out to
-// need a correction, reopen it, fix it, and re-sign. Doesn't touch the
+// editing by setting status back to in_progress) -- the non-destructive
+// alternative to DELETE /:id below: instead of erasing a signed sheet that
+// turns out to need a correction, reopen it, fix it, and re-sign. Open to
+// QC as well (unlike DELETE), since nothing is lost -- every unlock is
+// audited and the original signature is kept. Doesn't touch the
 // signatures table -- the old signature row is left exactly as it was (the
 // trg_status_requires_signature/trg_signature_requires_status triggers in
 // schema.sql only constrain moving TO approved/rejected, not back to
@@ -1593,11 +1597,29 @@ router.put("/:id/status", attachRole, (req, res) => {
 // audit log and the signatures table, even though getInspectionDetail's
 // "most recent wins" read only ever surfaces the latest one as *the*
 // signature shown on the report.
-router.put("/:id/unlock", attachRole, requireRole("admin", "supervisor", "qa_manager"), (req, res) => {
+router.put("/:id/unlock", attachRole, requireRole("qc", "admin", "supervisor", "qa_manager"), (req, res) => {
   const inspection = db.prepare("SELECT status FROM inspections WHERE id = ?").get(req.params.id);
   if (!inspection) return res.status(404).json({ error: "Inspection not found" });
   if (inspection.status === "in_progress") {
     return res.status(409).json({ error: "This Data Sheet is already open for editing." });
+  }
+  // QC can only reopen a sheet they signed themselves (the latest
+  // signature) -- never change someone else's signed record.
+  // Admin/Supervisor/QA Manager can reopen any.
+  if (!hasRole(req.user, "admin", "supervisor", "qa_manager")) {
+    const signer = db
+      .prepare(
+        `SELECT s.user_id, u.full_name FROM signatures s LEFT JOIN users u ON u.id = s.user_id
+         WHERE s.inspection_id = ? ORDER BY s.signed_at DESC, s.id DESC LIMIT 1`
+      )
+      .get(req.params.id);
+    if (!signer || signer.user_id !== req.user.id) {
+      return res.status(403).json({
+        error: `Only the person who signed this Data Sheet${
+          signer?.full_name ? ` (${signer.full_name})` : ""
+        } can unlock it — or ask an Admin, Supervisor, or QA Manager.`,
+      });
+    }
   }
 
   db.prepare("UPDATE inspections SET status = 'in_progress', updated_by = ? WHERE id = ?").run(

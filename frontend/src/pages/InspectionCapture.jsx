@@ -249,11 +249,11 @@ export default function InspectionCapture() {
   // "admin", "engineer", "supervisor", "qa_manager") now on every write route in
   // backend/src/routes/drawings.js.
   const canEditTemplate = hasAnyRole(user, ["qc", "admin", "engineer", "supervisor", "qa_manager"]);
-  // Matches the server-side requireRole("admin", "supervisor", "qa_manager") guard on PUT
-  // /:id/unlock -- same roles as DELETE /:id (InspectionHistory.jsx), since
-  // this is the non-destructive alternative to deleting a signed sheet that
-  // turns out to need a correction.
-  const canUnlock = hasAnyRole(user, ["admin", "supervisor", "qa_manager"]);
+  // Matches the server-side guard on PUT /:id/unlock: Admin/Supervisor/QA
+  // Manager can reopen any signed sheet; QC only one they signed themselves
+  // (the latest signature), never someone else's.
+  const isQcSigner = hasAnyRole(user, ["qc"]) && inspection?.signature?.user_id === user?.id;
+  const canUnlock = hasAnyRole(user, ["admin", "supervisor", "qa_manager"]) || isQcSigner;
 
   // Snapshots of what's actually been saved, so the beforeunload guard below
   // (and the autosave effects) can tell "typed but not saved" apart from
@@ -1161,6 +1161,13 @@ export default function InspectionCapture() {
               <button type="button" className="link-button" onClick={handleUnlock} disabled={unlocking}>
                 {unlocking ? "Reopening…" : "Unlock for editing"}
               </button>
+            </>
+          )}
+          {!canUnlock && hasAnyRole(user, ["qc"]) && (
+            <>
+              {" "}
+              Only {inspection.signature?.full_name || "the person who signed it"} can unlock it, or an Admin,
+              Supervisor, or QA Manager.
             </>
           )}
         </p>
