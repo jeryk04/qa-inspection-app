@@ -28,8 +28,9 @@ const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "https://localhost:5173";
 // Also allow the frontend when it's opened from another device on the local
 // network (e.g. a tablet testing the shop-floor UI) -- matches
 // http(s)://<private-LAN-ip>:<any port> (dev server, preview build, etc.) in
-// addition to the configured origin.
-const LAN_ORIGIN_RE = /^https?:\/\/(10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}):\d+$/;
+// addition to the configured origin. 192.11.x.x is the company LAN's subnet
+// (not an RFC 1918 range, but that's what the shop network actually uses).
+const LAN_ORIGIN_RE = /^https?:\/\/(10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.(168|11)\.\d{1,3}\.\d{1,3}):\d+$/;
 
 app.use(
   cors({
