@@ -89,8 +89,11 @@ export function AuthProvider({ children }) {
 
   // What role a page should behave as -- an admin previewing "as operator"
   // should see exactly what an operator sees, not admin's own unrestricted
-  // view. Non-admins always just get their own role.
-  const effectiveRole = user?.role === "admin" ? viewAs ?? "admin" : user?.role;
+  // view. Everyone else gets their main role (the one picked as main in
+  // Manage Users): extra roles add permissions (see hasAnyRole) but don't
+  // change which screens they get -- an Operator who's also a Supervisor
+  // still gets the Operator home, not the highest role's (QC) one.
+  const effectiveRole = user?.role === "admin" ? viewAs ?? "admin" : user?.main_role ?? user?.role;
 
   return (
     <AuthContext.Provider

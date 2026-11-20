@@ -382,4 +382,14 @@ if (!inspectionsTableSqlForSamples.includes("'samples'")) {
   `);
 }
 
+// Incoming Inspection's "Certification required" header checkbox. Added
+// after the table rebuilds above, so a rebuild can't drop it.
+if (!db.prepare("PRAGMA table_info(inspections)").all().some((c) => c.name === "cert_required")) {
+  db.exec("ALTER TABLE inspections ADD COLUMN cert_required INTEGER NOT NULL DEFAULT 0");
+}
+// Manually typed Rev in the sheet header (every inspection type).
+if (!db.prepare("PRAGMA table_info(inspections)").all().some((c) => c.name === "revision")) {
+  db.exec("ALTER TABLE inspections ADD COLUMN revision TEXT");
+}
+
 module.exports = db;

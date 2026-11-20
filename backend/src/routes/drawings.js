@@ -46,17 +46,35 @@ router.get("/", (req, res) => {
   res.json(drawings);
 });
 
-// GET /api/drawings/:id  (includes its active points -- retired ones are only
-// shown on the past inspections that used them, see getInspectionDetail)
-router.get("/:id", (req, res) => {
-  const drawing = db.prepare("SELECT * FROM balloon_drawings WHERE id = ?").get(req.params.id);
-  if (!drawing) return res.status(404).json({ error: "Drawing not found" });
+// Every drawing file on one revision, in display order: image_path first
+// (id "primary"), then the extra files from balloon_drawing_files.
+function getDrawingFiles(drawing) {
+  const extras = db
+    .prepare("SELECT id, file_path, original_name FROM balloon_drawing_files WHERE drawing_id = ? ORDER BY sort_order, id")
+    .all(drawing.id);
+  return [
+    ...(drawing.image_path ? [{ id: "primary", file_path: drawing.image_path, original_name: null }] : []),
+    ...extras,
+  ];
+}
 
+// The full drawing shape every read/write route returns: the row plus its
+// active points (retired ones are only shown on the past inspections that
+// used them, see getInspectionDetail) and its drawing files.
+function getDrawingDetail(id) {
+  const drawing = db.prepare("SELECT * FROM balloon_drawings WHERE id = ?").get(id);
+  if (!drawing) return null;
   const points = db
     .prepare("SELECT * FROM balloon_points WHERE drawing_id = ? AND retired_at IS NULL ORDER BY sort_order")
-    .all(req.params.id);
+    .all(id);
+  return { ...drawing, points, files: getDrawingFiles(drawing) };
+}
 
-  res.json({ ...drawing, points });
+// GET /api/drawings/:id
+router.get("/:id", (req, res) => {
+  const drawing = getDrawingDetail(req.params.id);
+  if (!drawing) return res.status(404).json({ error: "Drawing not found" });
+  res.json(drawing);
 });
 
 // GET /api/drawings/:id/analytics -- every measurement ever recorded
@@ -253,13 +271,64 @@ router.put("/:id", attachRole, requireRole("qc", "admin", "engineer", "superviso
        WHERE drawing_id = ? AND status = 'in_progress'`
     ).run(drawing.hundred_percent_inspection, drawing.machine_log_mode, drawing.id);
   }
-  // Same shape as GET /:id (points included) -- the frontend keeps whatever
-  // this returns as its current `drawing` state, and expects .points to
-  // always be an array there.
-  const points = db
-    .prepare("SELECT * FROM balloon_points WHERE drawing_id = ? AND retired_at IS NULL ORDER BY sort_order")
-    .all(req.params.id);
-  res.json({ ...drawing, points });
+  // Same shape as GET /:id (points and files included) -- the frontend keeps
+  // whatever this returns as its current `drawing` state, and expects
+  // .points to always be an array there.
+  res.json(getDrawingDetail(drawing.id));
+});
+
+// POST /api/drawings/:id/files  (multipart/form-data: image required) --
+// attaches another drawing file to this same revision, without creating a
+// new revision. If the revision has no drawing yet, the file becomes its
+// first drawing (image_path).
+router.post("/:id/files", attachRole, requireRole("qc", "admin", "engineer", "supervisor", "qa_manager"), upload.single("image"), (req, res) => {
+  const drawing = db.prepare("SELECT * FROM balloon_drawings WHERE id = ?").get(req.params.id);
+  if (!drawing) return res.status(404).json({ error: "Drawing not found" });
+  if (!req.file) return res.status(400).json({ error: "A drawing file is required." });
+
+  const filePath = `/uploads/${req.file.filename}`;
+  if (!drawing.image_path) {
+    db.prepare("UPDATE balloon_drawings SET image_path = ? WHERE id = ?").run(filePath, drawing.id);
+  } else {
+    const { maxOrder } = db
+      .prepare("SELECT MAX(sort_order) AS maxOrder FROM balloon_drawing_files WHERE drawing_id = ?")
+      .get(drawing.id);
+    db.prepare(
+      "INSERT INTO balloon_drawing_files (drawing_id, file_path, original_name, sort_order) VALUES (?, ?, ?, ?)"
+    ).run(drawing.id, filePath, req.file.originalname, maxOrder == null ? 0 : maxOrder + 1);
+  }
+  res.status(201).json(getDrawingDetail(drawing.id));
+});
+
+// DELETE /api/drawings/:id/files/:fileId  (fileId is an extra file's id, or
+// "primary" for the first drawing). A revision always keeps at least one
+// drawing once it has one -- past Data Sheets on it show its Rev only while
+// a drawing is attached -- so removing the first drawing promotes the next
+// one into its place, and removing the only drawing is refused.
+router.delete("/:id/files/:fileId", attachRole, requireRole("qc", "admin", "supervisor", "qa_manager"), (req, res) => {
+  const drawing = db.prepare("SELECT * FROM balloon_drawings WHERE id = ?").get(req.params.id);
+  if (!drawing) return res.status(404).json({ error: "Drawing not found" });
+
+  const files = getDrawingFiles(drawing);
+  if (!files.some((f) => String(f.id) === req.params.fileId)) {
+    return res.status(404).json({ error: "Drawing file not found" });
+  }
+  if (files.length < 2) {
+    return res.status(409).json({
+      error: "This is the only drawing on this revision, so it can't be removed. Add the correct drawing first, then remove this one.",
+    });
+  }
+
+  db.transaction(() => {
+    if (req.params.fileId === "primary") {
+      const next = files[1];
+      db.prepare("UPDATE balloon_drawings SET image_path = ? WHERE id = ?").run(next.file_path, drawing.id);
+      db.prepare("DELETE FROM balloon_drawing_files WHERE id = ?").run(next.id);
+    } else {
+      db.prepare("DELETE FROM balloon_drawing_files WHERE id = ? AND drawing_id = ?").run(req.params.fileId, drawing.id);
+    }
+  })();
+  res.json(getDrawingDetail(drawing.id));
 });
 
 // DELETE /api/drawings/:id  (cascades to its balloon_points; blocked if any point

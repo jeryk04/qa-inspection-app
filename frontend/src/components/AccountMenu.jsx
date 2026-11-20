@@ -90,7 +90,8 @@ export default function AccountMenu({ user, viewAs, onSelectView, onLogout }) {
 
   const initials = initialsFor(user.full_name);
   const isAdmin = user.role === "admin";
-  const isQc = user.role === "qc";
+  // Matches Home.jsx: the QC home (and its "View as" toggle) goes by main role.
+  const isQc = !isAdmin && effectiveRole === "qc";
   const isQaManager = hasAnyRole(user, ["qa_manager"]);
 
   const selectView = (role) => {

@@ -29,6 +29,9 @@ const SAMPLE_COLLAPSE_THRESHOLD = 10;
 const HEADER_FIELDS = [
   ["quantity", "Quantity"],
   ["customer", "Customer"],
+  // Blank = the drawing's Rev (shown as the placeholder); typed = overrides
+  // it, for when the drawing on file isn't updated yet.
+  ["revision", "Rev"],
   ["job_number", "Job# / WO#"],
   ["date", "Date"],
   ["sampling_plan_n", "Sampling Plan"],
@@ -45,11 +48,15 @@ const INCOMING_HEADER_FIELDS = [
   ["quantity", "Quantity"],
   ["supplier", "Supplier"],
   ["po_number", "PO#"],
+  ["revision", "Rev"],
   ["heat", "Heat #"],
   ["date", "Date"],
   ["sampling_plan_n", "Sampling Plan"],
   ["sampling_plan_c", "Total Rejected"],
   ["inspector", "By (Inspector)"],
+  // Can't be approved until a cert PDF is attached in the Certs section --
+  // see the matching check on PUT /:id/status.
+  ["cert_required", "Certification required"],
 ];
 
 // Final Inspection is the last stop in Set-up -> In-Process -> Final, so it's
@@ -75,7 +82,7 @@ function hasPerOperationRequirement(inspection) {
 // Template setup (DataSheetTemplate.jsx) and inherited at creation, not
 // edited per-inspection, so it's read straight off `inspection` instead of
 // living in this editable header-fields system at all.
-const BOOLEAN_HEADER_FIELDS = ["requires_in_process"];
+const BOOLEAN_HEADER_FIELDS = ["requires_in_process", "cert_required"];
 
 const ACTION_LABELS = {
   created: "Created",
@@ -964,6 +971,12 @@ export default function InspectionCapture() {
       setError("Set the inspector name (By) before approving or rejecting this Data Sheet.");
       return;
     }
+    // Same rule as the backend: a cert-required Incoming sheet can still be
+    // rejected without one, but not approved.
+    if (action !== "rejected" && latest.type === "incoming" && latest.cert_required && certs.length === 0) {
+      setError("This Incoming Inspection requires a certification. Attach the cert PDF before approving it.");
+      return;
+    }
     setSigningAction(action);
     setSignerName(user?.full_name ?? "");
     setSigningReason("");
@@ -1062,20 +1075,27 @@ export default function InspectionCapture() {
           <span className={`status status-${resultStatus(inspection)}`}>{resultLabel(resultStatus(inspection))}</span>
         </div>
         <div className="sheet-toolbar">
-          {drawing.image_path && (
-            <a
-              href={`${API_ORIGIN}${drawing.image_path}`}
-              target="_blank"
-              rel="noreferrer"
-              className="toolbar-btn"
-            >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-                <rect x="3" y="3" width="18" height="18" rx="2" />
-                <circle cx="8.5" cy="8.5" r="1.5" />
-                <path d="m21 15-5-5L5 21" />
-              </svg>
-              View Drawing
-            </a>
+          {/* One button per drawing file on the sheet's revision (sheet 2, a
+              detail drawing...). Falls back to image_path alone in case
+              files didn't come back with the drawing. */}
+          {(drawing.files || (drawing.image_path ? [{ id: "primary", file_path: drawing.image_path }] : [])).map(
+            (f, i, all) => (
+              <a
+                key={f.id}
+                href={`${API_ORIGIN}${f.file_path}`}
+                target="_blank"
+                rel="noreferrer"
+                className="toolbar-btn"
+                title={f.original_name || undefined}
+              >
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+                  <rect x="3" y="3" width="18" height="18" rx="2" />
+                  <circle cx="8.5" cy="8.5" r="1.5" />
+                  <path d="m21 15-5-5L5 21" />
+                </svg>
+                {all.length > 1 ? `Drawing ${i + 1}` : "View Drawing"}
+              </a>
+            )
           )}
           <Link
             to={`/inspections/${inspectionId}/sheet`}
@@ -1210,11 +1230,20 @@ export default function InspectionCapture() {
               <label key={field} className="header-field">
                 <span className="muted">{label}</span>
                 {isLocked ? (
-                  <span className="locked-value">{header[field] || "—"}</span>
+                  <span className="locked-value">
+                    {field === "revision" ? inspection.drawing_rev || "N/A" : header[field] || "—"}
+                  </span>
                 ) : (
                   <input
                     type={field === "date" ? "date" : "text"}
                     value={header[field] ?? ""}
+                    placeholder={
+                      field === "revision"
+                        ? inspection.template_rev
+                          ? `${inspection.template_rev} (from drawing)`
+                          : "N/A"
+                        : undefined
+                    }
                     onChange={(e) => handleHeaderChange(field, e.target.value)}
                   />
                 )}
@@ -1652,6 +1681,11 @@ export default function InspectionCapture() {
             )}
           </div>
           {certError && <p className="error">{certError}</p>}
+          {!isLocked && header.cert_required && certs.length === 0 && (
+            <p className="warning-note">
+              Certification required — attach the cert PDF before this Data Sheet can be approved.
+            </p>
+          )}
           {certs.length === 0 ? (
             <p className="muted">
               {isLocked ? "No certs attached." : "Attach the supplier's material cert / CoC as a PDF."}

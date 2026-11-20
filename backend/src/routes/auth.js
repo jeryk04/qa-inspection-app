@@ -33,14 +33,17 @@ router.post("/login", (req, res) => {
 
   const token = signToken(user);
   res.cookie(COOKIE_NAME, token, COOKIE_OPTIONS);
-  // role = highest of the user's roles, roles = all of them (lib/roles.js).
-  const { role, roles } = loadRoles(user.id);
+  // role = highest of the user's roles, roles = all of them, main_role =
+  // the one picked as main in Manage Users, which decides the Home screen
+  // (lib/roles.js).
+  const { role, roles, main_role } = loadRoles(user.id);
   res.json({
     id: user.id,
     username: user.username,
     full_name: user.full_name,
     role,
     roles,
+    main_role,
     must_change_password: !!user.must_change_password,
   });
 });
@@ -64,8 +67,8 @@ router.get("/me", (req, res) => {
       .prepare("SELECT id, username, full_name, role, must_change_password, email FROM users WHERE id = ?")
       .get(payload.sub);
     if (!user) return res.status(401).json({ error: "Not authenticated" });
-    const { role, roles } = loadRoles(user.id);
-    res.json({ ...user, role, roles, must_change_password: !!user.must_change_password });
+    const { role, roles, main_role } = loadRoles(user.id);
+    res.json({ ...user, role, roles, main_role, must_change_password: !!user.must_change_password });
   } catch {
     res.status(401).json({ error: "Not authenticated" });
   }
