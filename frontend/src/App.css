@@ -2127,6 +2127,30 @@ button.reject {
   margin: 16px 0;
 }
 
+/* Data Sheet Template: one View button per drawing file, each with its own
+   small remove button glued to its right edge. */
+.drawing-files {
+  flex-wrap: wrap;
+}
+
+.drawing-file {
+  display: inline-flex;
+  align-items: stretch;
+}
+
+.drawing-file > button:first-child:not(:last-child) {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+button.drawing-file-remove {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  border-left-width: 0;
+  padding-left: 10px;
+  padding-right: 10px;
+}
+
 .secondary-link {
   color: var(--accent);
   font-size: 14px;

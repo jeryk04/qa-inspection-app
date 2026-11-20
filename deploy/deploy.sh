@@ -1,82 +1,113 @@
 #!/usr/bin/env bash
 # Deploys a new version of the QA Inspection App on this server: backs up
 # the database, pulls the latest code, installs dependencies, builds the
-# frontend, and restarts the systemd services -- WITHOUT touching
-# backend/data.db, backend/uploads/, or any .env file. All three are
-# gitignored, so `git pull` never touches them; every existing inspection
-# stays exactly where it was. If a fix needs a schema change, ship it as an
-# additive, idempotent migration in backend/src/db.js (same pattern as the
-# existing migrations there, guarded by checking whether the change already
-# applied) -- it runs automatically the next time the backend starts, against
-# the live database, and never drops or rewrites existing rows.
+# frontend, and restarts the backend -- WITHOUT touching backend/data.db,
+# backend/uploads/, or any .env file. All three are gitignored, so a pull
+# never touches them; every existing inspection stays exactly where it was.
+# Schema changes ship as additive, idempotent migrations in backend/src/db.js
+# and run automatically when the backend starts.
 #
-# One-time setup before the first run:
-#   1. Edit User=/WorkingDirectory=/ExecStart= in both files under
-#      deploy/systemd/, then:
-#        sudo cp deploy/systemd/*.service /etc/systemd/system/
-#        sudo systemctl daemon-reload
-#        sudo systemctl enable qa-inspection-backend qa-inspection-frontend
-#   2. Create backend/.env with a real PORT and a real random JWT_SECRET
-#      (see backend/.env.example -- do NOT ship the placeholder value).
-#      Create frontend/.env too if VITE_API_URL needs to be explicit.
-#   3. (cd backend && npm install) once, so node_modules exists before the
-#      backend service starts for the first time.
-#   4. This script calls `sudo systemctl restart ...` -- either run the
-#      whole script with sudo, or grant the deploy user passwordless sudo
-#      for just those two commands (visudo):
-#        deployuser ALL=(root) NOPASSWD: /usr/bin/systemctl restart qa-inspection-backend, /usr/bin/systemctl restart qa-inspection-frontend
-#   5. Consider a daily cron for backend/scripts/backup.js -- suggested
-#      crontab line is in that file's own header comment.
+# Production layout (G&J server, qc.gjsteel.com):
+#   - the install directory is owned by a dedicated service user; this script
+#     runs as root (sudo) and does every git/npm step AS THAT USER, so file
+#     ownership never drifts and git never complains about "dubious ownership"
+#   - systemd runs only the backend (qa-inspection-backend, https on PORT)
+#   - nginx serves frontend/dist/ and proxies /api + /uploads to the backend,
+#     so there is no frontend service. frontend/.env must hold
+#     VITE_API_URL=/api so the build calls the API on its own origin.
+#   - an optional qa-inspection-frontend service (the old `vite preview`
+#     setup) is still restarted if it exists
 #
-# Usage:
-#   ./deploy/deploy.sh            deploy whatever the current branch's
-#                                  upstream has (plain `git pull`)
-#   ./deploy/deploy.sh <git-ref>  checkout and deploy this branch/tag first
+# The build goes to dist.new/ and is swapped in only once it succeeds, so a
+# failed build leaves the running site untouched and a good one replaces it
+# in one rename.
+#
+# Usage (as root, or it re-runs itself under sudo):
+#   deploy.sh              pull the current branch's upstream (fast-forward only)
+#   deploy.sh <git-ref>    switch to this branch/tag/commit first
+# QA_APP_DIR overrides the install directory (default: the repo this script
+# sits in, else /opt/qa-inspection-app).
 set -euo pipefail
 
-cd "$(dirname "$0")/.."  # repo root
+if [ "$(id -u)" -ne 0 ]; then
+  exec sudo -E "$0" "$@"
+fi
+
+SELF_REPO="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+if [ -n "${QA_APP_DIR:-}" ]; then
+  APP_DIR="$QA_APP_DIR"
+elif [ -f "$SELF_REPO/backend/src/index.js" ]; then
+  APP_DIR="$SELF_REPO"
+else
+  APP_DIR=/opt/qa-inspection-app
+fi
+cd "$APP_DIR"
 
 if [ ! -f backend/package.json ] || [ ! -f backend/src/index.js ]; then
-  echo "Error: this doesn't look like the QA Inspection App repo root." >&2
+  echo "Error: $APP_DIR doesn't look like the QA Inspection App repo root." >&2
   exit 1
 fi
 
-if [ -n "$(git status --porcelain)" ]; then
+OWNER="$(stat -c %U "$APP_DIR")"
+OWNER_HOME="$(getent passwd "$OWNER" | cut -d: -f6)"
+as_owner() { sudo -u "$OWNER" env HOME="$OWNER_HOME" "$@"; }
+
+BACKEND_UNIT=qa-inspection-backend
+FRONTEND_UNIT=qa-inspection-frontend
+BACKEND_PORT="$(grep -E '^PORT=' backend/.env 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' || true)"
+BACKEND_PORT="${BACKEND_PORT:-3001}"
+
+if [ -n "$(as_owner git status --porcelain)" ]; then
   echo "Error: the working tree has uncommitted/local changes -- refusing to deploy." >&2
   echo "This server's checkout should always be a clean mirror of a git ref; if" >&2
   echo "something was edited here directly, commit or discard it first." >&2
-  git status --short >&2
+  as_owner git status --short >&2
   exit 1
 fi
 
+if ! grep -qE '^VITE_API_URL=' frontend/.env 2>/dev/null && ! systemctl cat "$FRONTEND_UNIT" >/dev/null 2>&1; then
+  echo "Error: frontend/.env has no VITE_API_URL and there is no $FRONTEND_UNIT service." >&2
+  echo "Behind nginx the build must call its own origin: echo 'VITE_API_URL=/api' > frontend/.env" >&2
+  exit 1
+fi
+
+PREV="$(as_owner git rev-parse --short HEAD)"
 REF="${1:-}"
-BACKEND_PORT="${PORT:-3001}"  # override by exporting PORT if backend/.env uses a non-default one
 
 echo "==> Backing up the database before touching anything..."
-(cd backend && node scripts/backup.js)
+(cd backend && as_owner node scripts/backup.js)
 
 echo "==> Fetching latest code..."
-git fetch origin
+as_owner git fetch --prune origin
 if [ -n "$REF" ]; then
-  git checkout "$REF"
-  git pull origin "$REF"
+  if as_owner git rev-parse --verify --quiet "origin/$REF" >/dev/null; then
+    as_owner git checkout -B "$REF" "origin/$REF"   # a branch: track origin's copy
+  else
+    as_owner git checkout --detach "$REF"           # a tag or commit
+  fi
 else
-  git pull
+  as_owner git pull --ff-only
 fi
-echo "    now at: $(git rev-parse --short HEAD) ($(git log -1 --format=%s))"
+echo "    $PREV -> $(as_owner git rev-parse --short HEAD) ($(as_owner git log -1 --format=%s))"
 
 echo "==> Installing backend dependencies..."
-(cd backend && npm install)
+(cd backend && as_owner npm ci --no-audit --no-fund)
 
 echo "==> Installing frontend dependencies and building..."
-(cd frontend && npm install && npm run build)
+(cd frontend && as_owner npm ci --no-audit --no-fund \
+  && as_owner rm -rf dist.new \
+  && as_owner npx vite build --outDir dist.new --emptyOutDir)
+if [ ! -f frontend/dist.new/index.html ]; then
+  echo "Error: frontend build produced no index.html -- the running site was left as it was." >&2
+  exit 1
+fi
 
 echo "==> Restarting backend service..."
-sudo systemctl restart qa-inspection-backend
+systemctl restart "$BACKEND_UNIT"
 
 echo "==> Waiting for backend health check..."
 healthy=""
-for _ in $(seq 1 15); do
+for _ in $(seq 1 20); do
   if curl -sk -m 2 "https://localhost:${BACKEND_PORT}/api/health" 2>/dev/null | grep -q '"ok":true'; then
     healthy=1
     break
@@ -86,22 +117,25 @@ done
 
 if [ -z "$healthy" ]; then
   echo "" >&2
-  echo "!! Backend did not respond healthy after restart." >&2
-  echo "!! Check logs:  journalctl -u qa-inspection-backend -n 50 --no-pager" >&2
-  echo "!! The database was NOT modified by this deploy beyond your own" >&2
-  echo "!! migrations (if any) -- fix the code and rerun this script, or roll" >&2
-  echo "!! back the code with:" >&2
-  echo "!!   git checkout <previous-known-good-commit>" >&2
-  echo "!!   sudo systemctl restart qa-inspection-backend" >&2
-  echo "!! Either way, all inspection data recorded so far is untouched." >&2
+  echo "!! Backend did not respond healthy after restart. The new frontend was NOT swapped in." >&2
+  echo "!! Check logs:  journalctl -u $BACKEND_UNIT -n 50 --no-pager" >&2
+  echo "!! Roll back the code (data is untouched beyond additive migrations):" >&2
+  echo "!!   sudo -u $OWNER git -C $APP_DIR checkout $PREV && sudo systemctl restart $BACKEND_UNIT" >&2
   exit 1
 fi
 echo "    backend healthy."
 
-echo "==> Restarting frontend service..."
-sudo systemctl restart qa-inspection-frontend
+echo "==> Swapping in the new frontend build..."
+(cd frontend && as_owner rm -rf dist.old && { [ -d dist ] && as_owner mv dist dist.old || true; } \
+  && as_owner mv dist.new dist && as_owner rm -rf dist.old)
+
+if systemctl cat "$FRONTEND_UNIT" >/dev/null 2>&1; then
+  echo "==> Restarting frontend service..."
+  systemctl restart "$FRONTEND_UNIT"
+else
+  echo "    (frontend is served by nginx from frontend/dist -- nothing to restart)"
+fi
 
 echo ""
-echo "Deploy complete. $(git rev-parse --short HEAD) is now live."
-echo "  journalctl -u qa-inspection-backend -f"
-echo "  journalctl -u qa-inspection-frontend -f"
+echo "Deploy complete. $(as_owner git rev-parse --short HEAD) is now live."
+echo "  journalctl -u $BACKEND_UNIT -f"

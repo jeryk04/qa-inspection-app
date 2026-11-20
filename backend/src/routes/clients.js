@@ -2,16 +2,16 @@ const express = require("express");
 const db = require("../db");
 const attachRole = require("../middleware/attachRole");
 const requireRole = require("../middleware/requireRole");
-const { isAssignedToClient } = require("../lib/operatorAccess");
+const { isAssignedToClient, isCustomerRestricted } = require("../lib/operatorAccess");
 
 const router = express.Router();
 
-// GET /api/clients -- Operators only see customers an admin has assigned
+// GET /api/clients -- Operators/Supervisors (see isCustomerRestricted) only see customers an admin has assigned
 // them to (Admin > Users' "Assigned customers", see user_clients in
 // schema.sql); every other role sees every customer, unfiltered.
 router.get("/", attachRole, (req, res) => {
   const clients =
-    req.user.role === "operator"
+    isCustomerRestricted(req.user)
       ? db
           .prepare(
             `SELECT c.* FROM clients c
@@ -28,7 +28,7 @@ router.get("/", attachRole, (req, res) => {
 router.get("/:id", attachRole, (req, res) => {
   const client = db.prepare("SELECT * FROM clients WHERE id = ?").get(req.params.id);
   if (!client) return res.status(404).json({ error: "Client not found" });
-  if (req.user.role === "operator" && !isAssignedToClient(req.user.id, client.id)) {
+  if (isCustomerRestricted(req.user) && !isAssignedToClient(req.user.id, client.id)) {
     return res.status(403).json({ error: "You're not assigned to this customer." });
   }
   res.json(client);

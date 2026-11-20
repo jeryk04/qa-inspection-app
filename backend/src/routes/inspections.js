@@ -15,7 +15,7 @@ const { signInspectionStatus } = require("../lib/inspectionSigning");
 const { parsePassFailState } = require("../lib/passfail");
 const attachRole = require("../middleware/attachRole");
 const requireRole = require("../middleware/requireRole");
-const { isAssignedToClient } = require("../lib/operatorAccess");
+const { isAssignedToClient, isCustomerRestricted } = require("../lib/operatorAccess");
 const { computeWithinTolerance } = require("../lib/tolerance");
 const { performedBySql, DATA_ENTRY_ACTIONS } = require("../lib/performedBy");
 const { hasRole } = require("../lib/roles");
@@ -107,13 +107,15 @@ const HEADER_FIELDS = [
   "requires_in_process",
   "hundred_percent_inspection",
   "machine_log_mode",
+  "cert_required",
+  "revision",
 ];
 
 // Booleans stored as 0/1 INTEGER columns -- special-cased on every read of
 // req.body for these fields (POST's columns mapping and PUT's normalize
 // step below) since better-sqlite3 can't bind a raw JS boolean, and a plain
 // `?? null` would violate their NOT NULL constraint when omitted on create.
-const BOOLEAN_HEADER_FIELDS = ["requires_in_process", "hundred_percent_inspection", "machine_log_mode"];
+const BOOLEAN_HEADER_FIELDS = ["requires_in_process", "hundred_percent_inspection", "machine_log_mode", "cert_required"];
 
 // Final Inspection's "Operator In-Process Data Sheet required" gate (see PUT
 // /:id/status): satisfied by any in_process inspection on the same part that
@@ -663,13 +665,21 @@ function getInspectionDetail(id) {
     .prepare(
       `SELECT i.*, p.part_number, p.description AS part_description, p.client_id,
               c.name AS client_name, o.name AS operation_name, o.scope AS operation_scope,
-              -- The Rev printed in the sheet header, from the drawing revision
-              -- this inspection was created against (so an old sheet keeps
-              -- its own Rev after a new revision is uploaded). NULL -- shown
-              -- as "N/A" -- until a drawing file is attached and its Rev is
-              -- filled in.
+              -- The Rev printed on the sheet (title, PDF, printable view): the
+              -- Rev typed in the sheet's own header if any (for when the
+              -- drawing on file isn't updated yet), otherwise template_rev.
+              -- NULL -- shown as "N/A" -- when neither is set.
+              COALESCE(
+                NULLIF(TRIM(COALESCE(i.revision, '')), ''),
+                CASE WHEN d.image_path IS NOT NULL AND TRIM(COALESCE(d.revision_label, '')) <> ''
+                     THEN TRIM(d.revision_label) END
+              ) AS drawing_rev,
+              -- The Rev of the drawing revision this inspection was created
+              -- against (so an old sheet keeps its own Rev after a new
+              -- revision is uploaded) -- only once a drawing file is attached
+              -- and its Rev is filled in.
               CASE WHEN d.image_path IS NOT NULL AND TRIM(COALESCE(d.revision_label, '')) <> ''
-                   THEN TRIM(d.revision_label) END AS drawing_rev,
+                   THEN TRIM(d.revision_label) END AS template_rev,
               CASE WHEN i.type = 'in_process' THEN ${reminderIntervalSql("i")} END AS reinspect_interval_minutes,
               CASE WHEN i.type = 'in_process' THEN ${lastReadingAtSql("i")} END AS last_reading_at
        FROM inspections i
@@ -822,7 +832,7 @@ function getInspectionDetail(id) {
 router.get("/:id", attachRole, (req, res) => {
   const inspection = getInspectionDetail(req.params.id);
   if (!inspection) return res.status(404).json({ error: "Inspection not found" });
-  if (req.user.role === "operator" && !isAssignedToClient(req.user.id, inspection.client_id)) {
+  if (isCustomerRestricted(req.user) && !isAssignedToClient(req.user.id, inspection.client_id)) {
     return res.status(403).json({ error: "You're not assigned to this customer." });
   }
   res.json(inspection);
@@ -913,7 +923,7 @@ router.post("/", attachRole, (req, res) => {
     .prepare(`SELECT p.*, c.name AS client_name FROM parts p JOIN clients c ON c.id = p.client_id WHERE p.id = ?`)
     .get(part_id);
   if (!part) return res.status(404).json({ error: "Part not found" });
-  if (req.user.role === "operator" && !isAssignedToClient(req.user.id, part.client_id)) {
+  if (isCustomerRestricted(req.user) && !isAssignedToClient(req.user.id, part.client_id)) {
     return res.status(403).json({
       error: "You're not assigned to this customer. Ask an admin to assign it to you in Admin > Users.",
     });
@@ -990,7 +1000,7 @@ router.put("/:id", attachRole, (req, res) => {
   if (!canAccessType(req.user.role, existing.type)) {
     return res.status(403).json({ error: "Operators can only create or edit In-Process Data Sheets." });
   }
-  if (req.user.role === "operator" && !isAssignedToClient(req.user.id, existing.client_id)) {
+  if (isCustomerRestricted(req.user) && !isAssignedToClient(req.user.id, existing.client_id)) {
     return res.status(403).json({ error: "You're not assigned to this customer." });
   }
   if (existing.status !== "in_progress") {
@@ -1067,7 +1077,7 @@ router.put("/:id/measurements", attachRole, (req, res) => {
   if (!canAccessType(req.user.role, inspection.type)) {
     return res.status(403).json({ error: "Operators can only create or edit In-Process Data Sheets." });
   }
-  if (req.user.role === "operator" && !isAssignedToClient(req.user.id, inspection.client_id)) {
+  if (isCustomerRestricted(req.user) && !isAssignedToClient(req.user.id, inspection.client_id)) {
     return res.status(403).json({ error: "You're not assigned to this customer." });
   }
   if (inspection.status !== "in_progress") {
@@ -1146,7 +1156,7 @@ router.put("/:id/point-summaries", attachRole, (req, res) => {
   if (!canAccessType(req.user.role, inspection.type)) {
     return res.status(403).json({ error: "Operators can only create or edit In-Process Data Sheets." });
   }
-  if (req.user.role === "operator" && !isAssignedToClient(req.user.id, inspection.client_id)) {
+  if (isCustomerRestricted(req.user) && !isAssignedToClient(req.user.id, inspection.client_id)) {
     return res.status(403).json({ error: "You're not assigned to this customer." });
   }
   if (inspection.status !== "in_progress") {
@@ -1232,7 +1242,7 @@ router.put("/:id/sample-rows", attachRole, (req, res) => {
   if (!canAccessType(req.user.role, inspection.type)) {
     return res.status(403).json({ error: "Operators can only create or edit In-Process Data Sheets." });
   }
-  if (req.user.role === "operator" && !isAssignedToClient(req.user.id, inspection.client_id)) {
+  if (isCustomerRestricted(req.user) && !isAssignedToClient(req.user.id, inspection.client_id)) {
     return res.status(403).json({ error: "You're not assigned to this customer." });
   }
   if (inspection.status !== "in_progress") {
@@ -1300,7 +1310,7 @@ router.delete("/:id/measurements/:sampleNumber", attachRole, (req, res) => {
   if (!canAccessType(req.user.role, inspection.type)) {
     return res.status(403).json({ error: "Operators can only create or edit In-Process Data Sheets." });
   }
-  if (req.user.role === "operator" && !isAssignedToClient(req.user.id, inspection.client_id)) {
+  if (isCustomerRestricted(req.user) && !isAssignedToClient(req.user.id, inspection.client_id)) {
     return res.status(403).json({ error: "You're not assigned to this customer." });
   }
   if (inspection.status !== "in_progress") {
@@ -1350,7 +1360,7 @@ router.post("/:id/photos", attachRole, uploadPhoto.single("image"), (req, res) =
   if (!canAccessType(req.user.role, inspection.type)) {
     return res.status(403).json({ error: "Operators can only create or edit In-Process Data Sheets." });
   }
-  if (req.user.role === "operator" && !isAssignedToClient(req.user.id, inspection.client_id)) {
+  if (isCustomerRestricted(req.user) && !isAssignedToClient(req.user.id, inspection.client_id)) {
     return res.status(403).json({ error: "You're not assigned to this customer." });
   }
   if (inspection.status !== "in_progress") {
@@ -1378,7 +1388,7 @@ router.delete("/:id/photos/:photoId", attachRole, (req, res) => {
   if (!canAccessType(req.user.role, inspection.type)) {
     return res.status(403).json({ error: "Operators can only create or edit In-Process Data Sheets." });
   }
-  if (req.user.role === "operator" && !isAssignedToClient(req.user.id, inspection.client_id)) {
+  if (isCustomerRestricted(req.user) && !isAssignedToClient(req.user.id, inspection.client_id)) {
     return res.status(403).json({ error: "You're not assigned to this customer." });
   }
   if (inspection.status !== "in_progress") {
@@ -1528,7 +1538,9 @@ router.put("/:id/status", attachRole, (req, res) => {
   }
 
   const existing = db
-    .prepare("SELECT id, status, inspector, type, part_id, job_number, requires_in_process FROM inspections WHERE id = ?")
+    .prepare(
+      "SELECT id, status, inspector, type, part_id, job_number, requires_in_process, cert_required FROM inspections WHERE id = ?"
+    )
     .get(req.params.id);
   if (!existing) return res.status(404).json({ error: "Inspection not found" });
   if (existing.status !== "in_progress") {
@@ -1559,6 +1571,18 @@ router.put("/:id/status", attachRole, (req, res) => {
           "This Final Inspection is marked as requiring an Operator In-Process Data Sheet, but none has been recorded yet for this part" +
           (existing.job_number ? ` and WO# ${existing.job_number}` : "") +
           ".",
+      });
+    }
+  }
+
+  // Incoming's "Certification required": same idea as the In-Process gate
+  // above -- blocks a pass (plain or conditional) until a cert PDF is
+  // attached, but QC can still reject the material (e.g. for a missing cert).
+  if (status !== "rejected" && existing.type === "incoming" && existing.cert_required) {
+    const hasCert = db.prepare("SELECT 1 FROM inspection_certs WHERE inspection_id = ? LIMIT 1").get(existing.id);
+    if (!hasCert) {
+      return res.status(409).json({
+        error: "This Incoming Inspection requires a certification. Attach the cert PDF before approving it.",
       });
     }
   }
@@ -1699,7 +1723,7 @@ router.delete("/:id", attachRole, (req, res) => {
 router.get("/:id/pdf", attachRole, (req, res) => {
   const inspection = getInspectionDetail(req.params.id);
   if (!inspection) return res.status(404).json({ error: "Inspection not found" });
-  if (req.user.role === "operator" && !isAssignedToClient(req.user.id, inspection.client_id)) {
+  if (isCustomerRestricted(req.user) && !isAssignedToClient(req.user.id, inspection.client_id)) {
     return res.status(403).json({ error: "You're not assigned to this customer." });
   }
 
@@ -1712,7 +1736,7 @@ router.get("/:id/pdf", attachRole, (req, res) => {
 router.get("/:id/xlsx", attachRole, async (req, res) => {
   const inspection = getInspectionDetail(req.params.id);
   if (!inspection) return res.status(404).json({ error: "Inspection not found" });
-  if (req.user.role === "operator" && !isAssignedToClient(req.user.id, inspection.client_id)) {
+  if (isCustomerRestricted(req.user) && !isAssignedToClient(req.user.id, inspection.client_id)) {
     return res.status(403).json({ error: "You're not assigned to this customer." });
   }
 

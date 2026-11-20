@@ -64,6 +64,13 @@ export default function DataSheetTemplate() {
   const [drawing, setDrawing] = useState(null);
   const [file, setFile] = useState(null);
   const [uploading, setUploading] = useState(false);
+  // "Add another drawing" to the current revision (sheet 2, a detail
+  // drawing...) -- separate from `file` above, which uploads a whole new
+  // revision. The input is re-keyed after each add to clear it.
+  const [extraFiles, setExtraFiles] = useState([]);
+  const [addingFiles, setAddingFiles] = useState(false);
+  const [extraInputKey, setExtraInputKey] = useState(0);
+  const [removingFileId, setRemovingFileId] = useState(null);
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState(null);
   const errorRef = useRef(null);
@@ -256,6 +263,45 @@ export default function DataSheetTemplate() {
       setError(e.message);
     } finally {
       setDeleting(false);
+    }
+  };
+
+  // One request per file, in the order picked, so they keep that order.
+  const handleAddFiles = async (e) => {
+    e.preventDefault();
+    if (extraFiles.length === 0) return;
+    setAddingFiles(true);
+    setError(null);
+    try {
+      let updated = drawing;
+      for (const f of extraFiles) {
+        const formData = new FormData();
+        formData.append("image", f);
+        updated = await api.addDrawingFile(drawing.id, formData);
+      }
+      setDrawing((prev) => ({ ...prev, image_path: updated.image_path, files: updated.files }));
+      setExtraFiles([]);
+      setExtraInputKey((k) => k + 1);
+      await loadList();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setAddingFiles(false);
+    }
+  };
+
+  const handleRemoveFile = async (fileId, label) => {
+    if (!(await confirm(`Remove ${label} from this revision?`))) return;
+    setRemovingFileId(fileId);
+    setError(null);
+    try {
+      const updated = await api.deleteDrawingFile(drawing.id, fileId);
+      setDrawing((prev) => ({ ...prev, image_path: updated.image_path, files: updated.files }));
+      await loadList();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setRemovingFileId(null);
     }
   };
 
@@ -508,7 +554,6 @@ export default function DataSheetTemplate() {
     }
   };
 
-  const fileUrl = drawing ? `${API_ORIGIN}${drawing.image_path}` : null;
   const columnsById = new Map((drawing ? [...drawing.points, ...newColumns] : []).map((c) => [c.id, c]));
   const allColumns = [
     ...columnOrder.filter((id) => columnsById.has(id)).map((id) => columnsById.get(id)),
@@ -660,14 +705,55 @@ export default function DataSheetTemplate() {
             )}
 
             {drawing.image_path ? (
-              <div className="actions-row">
-                <button type="button" onClick={() => window.open(fileUrl, "_blank", "noopener,noreferrer")}>
-                  View Drawing {isPdf(drawing.image_path) ? "(PDF)" : ""}
-                </button>
-                <button onClick={() => handleDelete(drawing.id)} disabled={deleting} className="reject">
-                  Delete this revision
-                </button>
-              </div>
+              <>
+                <div className="actions-row drawing-files">
+                  {(drawing.files || [{ id: "primary", file_path: drawing.image_path }]).map((f, i, all) => {
+                    const label = all.length > 1 ? `Drawing ${i + 1}` : "Drawing";
+                    return (
+                      <span key={f.id} className="drawing-file">
+                        <button
+                          type="button"
+                          title={f.original_name || undefined}
+                          onClick={() => window.open(`${API_ORIGIN}${f.file_path}`, "_blank", "noopener,noreferrer")}
+                        >
+                          View {label} {isPdf(f.file_path) ? "(PDF)" : ""}
+                        </button>
+                        {all.length > 1 && (
+                          <button
+                            type="button"
+                            className="secondary-btn drawing-file-remove"
+                            title={`Remove ${label}`}
+                            aria-label={`Remove ${label}`}
+                            disabled={removingFileId !== null}
+                            onClick={() => handleRemoveFile(f.id, label)}
+                          >
+                            ✕
+                          </button>
+                        )}
+                      </span>
+                    );
+                  })}
+                  <button onClick={() => handleDelete(drawing.id)} disabled={deleting} className="reject">
+                    Delete this revision
+                  </button>
+                </div>
+                <form className="inline-form" onSubmit={handleAddFiles}>
+                  <input
+                    key={extraInputKey}
+                    type="file"
+                    multiple
+                    accept="image/*,application/pdf"
+                    onChange={(e) => setExtraFiles(Array.from(e.target.files))}
+                  />
+                  <button type="submit" className="secondary-btn" disabled={addingFiles || extraFiles.length === 0}>
+                    {addingFiles ? "Adding…" : `Add drawing${extraFiles.length > 1 ? "s" : ""} to this revision`}
+                  </button>
+                </form>
+                <p className="muted">
+                  For a drawing that comes as more than one file (sheet 2, a detail drawing…) — adds it to this same
+                  Rev without starting a new revision.
+                </p>
+              </>
             ) : (
               <p className="muted">
                 No drawing image uploaded yet for this revision — you can still set up Find# columns below, and

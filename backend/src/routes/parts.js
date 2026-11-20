@@ -3,7 +3,7 @@ const db = require("../db");
 const attachRole = require("../middleware/attachRole");
 const requireRole = require("../middleware/requireRole");
 const { archiveOperation } = require("../lib/trash");
-const { isAssignedToClient } = require("../lib/operatorAccess");
+const { isAssignedToClient, isCustomerRestricted } = require("../lib/operatorAccess");
 const { partSetupStatus } = require("../lib/partSetup");
 
 const router = express.Router();
@@ -14,13 +14,13 @@ const router = express.Router();
 // nothing, same as clients.js's GET /:id.
 router.get("/", attachRole, (req, res) => {
   const { client_id } = req.query;
-  if (req.user.role === "operator" && client_id && !isAssignedToClient(req.user.id, client_id)) {
+  if (isCustomerRestricted(req.user) && client_id && !isAssignedToClient(req.user.id, client_id)) {
     return res.status(403).json({ error: "You're not assigned to this customer." });
   }
   let parts;
   if (client_id) {
     parts = db.prepare("SELECT * FROM parts WHERE client_id = ? ORDER BY part_number").all(client_id);
-  } else if (req.user.role === "operator") {
+  } else if (isCustomerRestricted(req.user)) {
     parts = db
       .prepare(
         `SELECT p.* FROM parts p
@@ -41,7 +41,7 @@ router.get("/", attachRole, (req, res) => {
 router.get("/setup-status", attachRole, (req, res) => {
   const clientId = Number(req.query.client_id);
   if (!Number.isInteger(clientId)) return res.status(400).json({ error: "client_id is required" });
-  if (req.user.role === "operator" && !isAssignedToClient(req.user.id, clientId)) {
+  if (isCustomerRestricted(req.user) && !isAssignedToClient(req.user.id, clientId)) {
     return res.status(403).json({ error: "You're not assigned to this customer." });
   }
   const partIds = db.prepare("SELECT id FROM parts WHERE client_id = ?").all(clientId).map((p) => p.id);
@@ -56,7 +56,7 @@ router.get("/setup-summary", attachRole, (req, res) => {
     .split(",")
     .map(Number)
     .filter(Number.isInteger)
-    .filter((id) => req.user.role !== "operator" || isAssignedToClient(req.user.id, id));
+    .filter((id) => !isCustomerRestricted(req.user) || isAssignedToClient(req.user.id, id));
   const parts = clientIds.length
     ? db.prepare("SELECT id, client_id FROM parts WHERE client_id IN (SELECT value FROM json_each(?))").all(JSON.stringify(clientIds))
     : [];
@@ -79,7 +79,7 @@ router.get("/:id/setup-status", attachRole, (req, res) => {
     .prepare("SELECT p.*, c.name AS client_name FROM parts p JOIN clients c ON c.id = p.client_id WHERE p.id = ?")
     .get(req.params.id);
   if (!part) return res.status(404).json({ error: "Part not found" });
-  if (req.user.role === "operator" && !isAssignedToClient(req.user.id, part.client_id)) {
+  if (isCustomerRestricted(req.user) && !isAssignedToClient(req.user.id, part.client_id)) {
     return res.status(403).json({ error: "You're not assigned to this customer." });
   }
   res.json({ part, status: partSetupStatus([part.id]).get(part.id) });
@@ -89,7 +89,7 @@ router.get("/:id/setup-status", attachRole, (req, res) => {
 router.get("/:id", attachRole, (req, res) => {
   const part = db.prepare("SELECT * FROM parts WHERE id = ?").get(req.params.id);
   if (!part) return res.status(404).json({ error: "Part not found" });
-  if (req.user.role === "operator" && !isAssignedToClient(req.user.id, part.client_id)) {
+  if (isCustomerRestricted(req.user) && !isAssignedToClient(req.user.id, part.client_id)) {
     return res.status(403).json({ error: "You're not assigned to this customer." });
   }
   res.json(part);
@@ -164,7 +164,7 @@ router.delete("/:id", attachRole, requireRole("qc", "admin", "supervisor", "qa_m
 // used by OperationDetail.jsx/DataSheetTemplate.jsx which already know the
 // specific operationId they want and just need to find it in the list.)
 router.get("/:partId/operations", attachRole, (req, res) => {
-  if (req.user.role === "operator") {
+  if (isCustomerRestricted(req.user)) {
     const part = db.prepare("SELECT client_id FROM parts WHERE id = ?").get(req.params.partId);
     if (part && !isAssignedToClient(req.user.id, part.client_id)) {
       return res.status(403).json({ error: "You're not assigned to this customer." });

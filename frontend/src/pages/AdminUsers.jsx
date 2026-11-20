@@ -55,11 +55,12 @@ function TrashIcon() {
 
 // Admin-only user management: create/edit users, assign a role, toggle
 // active, reset a password, and tag which customers a user is assigned to.
-// For an Operator account, this customer assignment is a real access
-// restriction -- an Operator can only browse/create/view/edit In-Process
-// work for a customer checked here (see backend/src/lib/operatorAccess.js
-// and schema.sql's user_clients comment). Every other role is unrestricted
-// by customer regardless of what's checked here.
+// For an Operator or Supervisor account (one holding no other role), this
+// customer assignment is a real access restriction -- they can only
+// browse/create/view/edit work for a customer checked here (see
+// backend/src/lib/operatorAccess.js's isCustomerRestricted and schema.sql's
+// user_clients comment). Anyone who also holds QC/Engineer/QA Manager/Admin
+// is unrestricted by customer regardless of what's checked here.
 export default function AdminUsers() {
   const { user: currentUser } = useAuth();
   const [users, setUsers] = useState([]);

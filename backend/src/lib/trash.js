@@ -20,6 +20,9 @@ function archiveOperation(db, operation, part, userId) {
   const points = drawings.flatMap((d) =>
     db.prepare("SELECT * FROM balloon_points WHERE drawing_id = ?").all(d.id)
   );
+  const drawingFiles = drawings.flatMap((d) =>
+    db.prepare("SELECT * FROM balloon_drawing_files WHERE drawing_id = ?").all(d.id)
+  );
 
   const inspections = db.prepare("SELECT * FROM inspections WHERE operation_id = ?").all(operation.id);
   const inspectionIds = inspections.map((i) => i.id);
@@ -49,6 +52,7 @@ function archiveOperation(db, operation, part, userId) {
     operation,
     drawings,
     points,
+    drawingFiles,
     inspections,
     measurements,
     pointSummaries,
@@ -122,6 +126,10 @@ function restoreOperation(db, snapshot) {
       retired_at: p.retired_at ?? null,
     })
   );
+
+  // Extra drawing files per revision (see balloon_drawing_files) -- older
+  // snapshots predate them and have none.
+  (snapshot.drawingFiles || []).forEach((f) => insertSnapshotRow(db, "balloon_drawing_files", f));
 
   const insertInspection = db.prepare(`
     INSERT INTO inspections

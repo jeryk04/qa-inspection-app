@@ -961,7 +961,7 @@ function AdminMenu({ onSelect }) {
 // Analytics) via the same AccountMenu "View as" mechanism -- see
 // AccountMenu.jsx's QC_VIEW_OPTIONS.
 export default function Home({ adminView, setAdminView }) {
-  const { user } = useAuth();
+  const { user, effectiveRole } = useAuth();
 
   if (user?.role === "admin") {
     if (adminView === "qc") return <QcHome />;
@@ -970,11 +970,13 @@ export default function Home({ adminView, setAdminView }) {
     return <AdminMenu onSelect={setAdminView} />;
   }
 
-  if (user?.role === "qc") {
+  // Everyone else: their main role picks the screen (effectiveRole, see
+  // AuthContext) -- an extra role like Supervisor only adds permissions.
+  if (effectiveRole === "qc") {
     return adminView === "engineer" ? <EngineerHome /> : <QcHome />;
   }
 
-  if (user?.role === "operator") return <OperatorHome />;
-  if (user?.role === "engineer") return <EngineerHome />;
+  if (effectiveRole === "operator") return <OperatorHome />;
+  if (effectiveRole === "engineer") return <EngineerHome />;
   return <QcHome />;
 }

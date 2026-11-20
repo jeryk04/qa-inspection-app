@@ -104,6 +104,23 @@ CREATE TABLE IF NOT EXISTS balloon_drawings (
   created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Extra drawing files on one template revision, for a part whose drawing
+-- comes as more than one file (e.g. sheet 1 + sheet 2, or an assembly
+-- drawing + a detail drawing). balloon_drawings.image_path stays the first
+-- drawing -- it's what the Rev display, setup status, etc. key off -- and
+-- these are the 2nd, 3rd... in sort_order. Not copied forward when a new
+-- revision is uploaded: a new revision brings its own drawing files.
+CREATE TABLE IF NOT EXISTS balloon_drawing_files (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  drawing_id    INTEGER NOT NULL REFERENCES balloon_drawings(id) ON DELETE CASCADE,
+  file_path     TEXT NOT NULL,
+  original_name TEXT,
+  sort_order    INTEGER NOT NULL DEFAULT 0,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_balloon_drawing_files_drawing ON balloon_drawing_files(drawing_id);
+
 -- Each "balloon" point (Find #) within a drawing, with its specification.
 -- balloon_number is free text, not a strict number — most are "1", "2", etc.
 -- but some are named dimensions like "Length" or "Angle". sort_order is the
@@ -174,6 +191,8 @@ CREATE TABLE IF NOT EXISTS inspections (
   requires_in_process INTEGER NOT NULL DEFAULT 0, -- 0/1; Final Inspection only -- see hasQualifyingInProcess in routes/inspections.js
   hundred_percent_inspection INTEGER NOT NULL DEFAULT 0, -- 0/1; In-Process only -- switches specless columns to inspection_point_summaries instead of one measurements row per sample
   machine_log_mode   INTEGER NOT NULL DEFAULT 0, -- 0/1; In-Process only -- see balloon_drawings.machine_log_mode and inspection_sample_rows
+  cert_required      INTEGER NOT NULL DEFAULT 0, -- 0/1; Incoming only -- can't be approved until a cert PDF is attached (see PUT /:id/status)
+  revision           TEXT, -- Rev typed in the sheet header, for when the drawing on file isn't updated yet; overrides the drawing's Rev (see getInspectionDetail's drawing_rev)
   created_by          INTEGER REFERENCES users(id),
   updated_by          INTEGER REFERENCES users(id)
 );

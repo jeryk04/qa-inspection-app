@@ -109,6 +109,9 @@ export const api = {
   uploadDrawing: (formData) => request("/drawings", { method: "POST", body: formData }),
   updateDrawing: (id, data) => request(`/drawings/${id}`, { method: "PUT", body: JSON.stringify(data) }),
   deleteDrawing: (id) => request(`/drawings/${id}`, { method: "DELETE" }),
+  // Extra drawing files on the same revision (sheet 2, detail drawing...)
+  addDrawingFile: (id, formData) => request(`/drawings/${id}/files`, { method: "POST", body: formData }),
+  deleteDrawingFile: (id, fileId) => request(`/drawings/${id}/files/${fileId}`, { method: "DELETE" }),
   addPoint: (drawingId, data) =>
     request(`/drawings/${drawingId}/points`, { method: "POST", body: JSON.stringify(data) }),
   updatePoint: (pointId, data) =>
