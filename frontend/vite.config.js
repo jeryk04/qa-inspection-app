@@ -15,6 +15,14 @@ export default defineConfig({
     basicSsl(),
     VitePWA({
       registerType: 'autoUpdate',
+      // On the server the API and uploaded files share the app's origin
+      // (nginx proxies /api and /uploads to the backend). Without this the
+      // service worker answers every navigation with the app shell -- so
+      // opening a drawing PDF in a tab showed a blank app page instead of
+      // the file. Let those paths go straight to the network.
+      workbox: {
+        navigateFallbackDenylist: [/^\/uploads\//, /^\/api\//],
+      },
       // Registers the service worker in `vite dev` too, not just a
       // production build -- installability requires one, and this is
       // meant to be tested straight off the dev server.
